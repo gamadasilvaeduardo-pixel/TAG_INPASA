@@ -122,7 +122,7 @@ def normalize_supervisor_field(text: str) -> str:
     s = (text or "").strip().upper()
     s = _fix_parentheses(s)
 
-    # remove par externo completo para não duplicar e reconstrói
+    # se já tiver par externo, remove pra reconstruir sem duplicar
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
 
@@ -208,7 +208,7 @@ def ensure_state():
     if "auth" not in st.session_state:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
 
-    # ✅ LISTA POR USUÁRIO
+    # LISTA POR USUÁRIO
     if "items_by_user" not in st.session_state:
         st.session_state["items_by_user"] = {}  # user -> list[dict]
 
@@ -221,7 +221,7 @@ def ensure_state():
         st.session_state["base_prefix"] = bp
         st.session_state["bases_saved_at"] = saved_at
 
-    # ✅ RELATÓRIO POR USUÁRIO (último PDF gerado por cada user)
+    # RELATÓRIO POR USUÁRIO (último PDF gerado por cada user)
     if "report_by_user" not in st.session_state:
         st.session_state["report_by_user"] = {}  # user -> {bytes,name,meta}
 
@@ -246,14 +246,10 @@ auth = st.session_state["auth"]
 if not auth["logged"]:
     st.subheader("Login")
 
-    u_in = st.text_input("Usuário", value="", placeholder="ex: joao ou admin")
+    u_in = st.text_input("Usuário", value="", placeholder="ex: joao")
     p_in = st.text_input("Senha", value="", type="password", placeholder="ex: joao123")
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        do_login = st.button("Entrar")
-    with col2:
-        st.caption("Admin: admin / cpcm123")
+    do_login = st.button("Entrar")
 
     if do_login:
         u = (u_in or "").strip()
@@ -263,10 +259,12 @@ if not auth["logged"]:
             st.error("Informe usuário e senha.")
             st.stop()
 
+        # admin
         if u.lower() == ADMIN_USER and p == ADMIN_PASS:
             st.session_state["auth"] = {"logged": True, "role": "admin", "user": "ADMIN"}
             st.rerun()
 
+        # user comum
         if p.lower() == user_password_rule(u).lower():
             user_norm = norm_user(u)
             allow = st.session_state["allowlist"]
@@ -278,6 +276,7 @@ if not auth["logged"]:
             st.rerun()
 
         st.error("Usuário ou senha inválidos.")
+
     st.stop()
 
 # =========================
