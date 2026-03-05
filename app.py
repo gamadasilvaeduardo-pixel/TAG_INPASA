@@ -30,7 +30,6 @@ ADMIN_PASS = "cpcm123"
 
 # =========================
 # Persistência simples (JSON local do app)
-# (permitidos / cache bases)
 # =========================
 ALLOWLIST_FILE = "users_allowlist.json"
 BASE_CACHE_FILE = "bases_cache.json"
@@ -209,7 +208,7 @@ def get_log_worksheet():
     ws_name = st.secrets["log_sheet"].get("worksheet", "LOG")
     sh = gc.open_by_key(sheet_id)
 
-    # ✅ se não existir, cria (não quebra mais)
+    # garante worksheet
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
@@ -265,14 +264,8 @@ def ensure_state():
         st.session_state["base_prefix"] = bp
         st.session_state["bases_saved_at"] = saved_at
 
-    # login widgets
     st.session_state.setdefault("login_user", "")
     st.session_state.setdefault("login_pass", "")
-
-    # pdf cache
-    st.session_state.setdefault("pdf_bytes", b"")
-    st.session_state.setdefault("pdf_ready_ts", "")
-    st.session_state.setdefault("pdf_ready_user", "")
 
 ensure_state()
 
@@ -340,9 +333,6 @@ with top2:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
         st.session_state["login_user"] = ""
         st.session_state["login_pass"] = ""
-        st.session_state["pdf_bytes"] = b""
-        st.session_state["pdf_ready_ts"] = ""
-        st.session_state["pdf_ready_user"] = ""
         st.rerun()
 
 # =========================
@@ -464,8 +454,9 @@ base_prefix = st.session_state["base_prefix"]
 tag_raw = st.text_input("TAG", value="", placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019", key="inp_tag")
 tag = norm_tag(tag_raw)
 
-is_big = st.checkbox("TAG GRANDE (150×150)", value=False, key="chk_big")
-layout_name = "big" if is_big else "small"
+# ✅ Somente 2 modelos: 50x100 e 150x150
+is_square = st.checkbox("TAG QUADRADA (150×150)", value=False, key="chk_square")
+layout_name = "square" if is_square else "small"
 
 desc_in = ""
 manual_flag = False
@@ -543,7 +534,7 @@ if st.button("Adicionar à lista", key="btn_add"):
 st.divider()
 
 # =========================
-# STEP 3 — lista + PDF
+# STEP 3 — lista + PDF (LOG no clique)
 # =========================
 st.subheader("3) Lista atual (sua lista)")
 
@@ -555,7 +546,7 @@ if items:
             {
                 "TAG": it["tag"],
                 "DESCRIÇÃO": it["desc"],
-                "LAYOUT": "150×150" if it.get("layout") == "big" else "100×50",
+                "LAYOUT": "150×150" if it.get("layout") == "square" else "100×50",
                 "MANUAL": "SIM" if it.get("manual") else "",
                 "ALTERADO": "SIM" if it.get("changed") else "",
             }
@@ -572,46 +563,37 @@ c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("Limpar lista", key="btn_clear"):
         set_user_items(user, [])
-        st.session_state["pdf_bytes"] = b""
-        st.session_state["pdf_ready_ts"] = ""
-        st.session_state["pdf_ready_user"] = ""
         st.success("Sua lista foi limpa.")
-
-def _on_generate_pdf_click(rows_log, pdf_bytes, ts_pdf, user_now):
-    # grava log + guarda bytes
-    append_log_rows_gs(rows_log)
-    st.session_state["pdf_bytes"] = pdf_bytes
-    st.session_state["pdf_ready_ts"] = ts_pdf
-    st.session_state["pdf_ready_user"] = user_now
 
 with c2:
     if items:
         ts_pdf = now_str()
-
         rows_log = []
         for it in items:
             status = "MANUAL" if it.get("manual") else ("ALTERADO" if it.get("changed") else "BASE")
-            layout = "150×150" if it.get("layout") == "big" else "100×50"
+            layout = "150×150" if it.get("layout") == "square" else "100×50"
             rows_log.append([ts_pdf, user, it["tag"], it["desc"], status, layout])
 
-        pdf_bytes = build_pdf_bytes_mixed([
-            (it["tag"], it["desc"], it.get("layout", "small"))
-            for it in items
-        ])
-
-        # ✅ log só quando clicar no botão (on_click), sem travar UI
         try:
-            st.download_button(
-                "Gerar/baixar PDF",
-                data=pdf_bytes,
-                file_name="tags.pdf",
-                mime="application/pdf",
-                key="btn_dl_pdf",
-                on_click=_on_generate_pdf_click,
-                args=(rows_log, pdf_bytes, ts_pdf, user),
-            )
+            pdf_bytes = build_pdf_bytes_mixed([
+                (it["tag"], it["desc"], it.get("layout", "small"))
+                for it in items
+            ])
         except Exception as e:
-            st.error(f"Falha ao preparar PDF/LOG: {e}")
+            st.error(f"Falha ao gerar PDF: {e}")
             st.stop()
+
+        # grava log só se clicar pra baixar
+        def _on_download():
+            append_log_rows_gs(rows_log)
+
+        st.download_button(
+            "Gerar/baixar PDF",
+            data=pdf_bytes,
+            file_name="tags.pdf",
+            mime="application/pdf",
+            key="btn_dl_pdf",
+            on_click=_on_download,
+        )
     else:
         st.button("Gerar/baixar PDF", disabled=True, key="btn_dl_pdf_disabled")
