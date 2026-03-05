@@ -47,7 +47,7 @@ DEFAULTS = {
         "tag_fs_max": 32.0,   # ✅ do print
         "tag_fs_min": 14.0,   # ✅ do print
         "foot_fs_min": 8.0, "foot_fs_max": 14.0,
-        "tag_y_offset_mm": 2.0,  # ✅ sobe a TAG (ajuste fino)
+        "tag_y_offset_mm": 3.5,  # ✅ sobe a TAG (ajuste fino)
     },
 
     # TAG QUADRADA (150x150)
@@ -380,3 +380,4 @@ def build_pdf_bytes_mixed(items):
     c.save()
     bio.seek(0)
     return bio.getvalue()
+
