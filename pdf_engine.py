@@ -32,8 +32,7 @@ LOGO_PNG_B64 = (
 # PRESETS (iguais ao print) — só SMALL e SQUARE
 # =========================================================
 DEFAULTS = {
-    "small": {
-    ...
+"small": {
     "tag_top_mm": 3.0
 },
 
@@ -352,4 +351,5 @@ def build_pdf_bytes_mixed(items):
     c.save()
     bio.seek(0)
     return bio.getvalue()
+
 
