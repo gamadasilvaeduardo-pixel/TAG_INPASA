@@ -9,21 +9,25 @@ import streamlit as st
 from datetime import datetime
 from openpyxl import load_workbook, Workbook
 
+import gspread
+from google.oauth2.service_account import Credentials
+
 from pdf_engine import build_pdf_bytes_mixed
 
 st.set_page_config(page_title="Gerador de Tags", layout="wide")
-
-# =========================
-# CONFIG (arquivos locais)
-# =========================
-ALLOWLIST_FILE = "users_allowlist.json"
-BASE_CACHE_FILE = "bases_cache.json"  # cache local das bases (JSON)
 
 # =========================
 # AUTH (simples)
 # =========================
 ADMIN_USER = "admin"
 ADMIN_PASS = "cpcm123"
+
+# =========================
+# Persistência simples (JSON local do app)
+# (permitidos / cache bases)
+# =========================
+ALLOWLIST_FILE = "users_allowlist.json"
+BASE_CACHE_FILE = "bases_cache.json"
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -32,12 +36,12 @@ def norm_user(s: str) -> str:
     return (s or "").strip().upper()
 
 def user_password_rule(username: str) -> str:
-    # senha do usuário normal = <usuario>123 (case-insensitive)
+    # usuário normal: senha = <usuario>123
     u = (username or "").strip().lower()
     return f"{u}123"
 
 # =========================
-# Helpers de TAG / XLSX
+# TAG helpers
 # =========================
 def norm_tag(s: str) -> str:
     s = (s or "").strip()
@@ -49,13 +53,9 @@ def get_prefix(tag: str) -> str:
     m = re.match(r"^([A-Z]+)", (tag or "").upper())
     return m.group(1) if m else ""
 
-def idx_of(headers_list, *names):
-    for n in names:
-        n = n.upper()
-        if n in headers_list:
-            return headers_list.index(n)
-    return None
-
+# =========================
+# XLSX helpers (sem pandas)
+# =========================
 def list_sheets(uploaded_file):
     if uploaded_file is None:
         return []
@@ -81,15 +81,17 @@ def read_xlsx(uploaded_file, sheet_name=None):
     wb.close()
     return headers, rows
 
+def idx_of(headers_list, *names):
+    for n in names:
+        n = n.upper()
+        if n in headers_list:
+            return headers_list.index(n)
+    return None
+
 # =========================
-# REGRA DO SUPERVISÓRIO (PARÊNTESES OBRIGATÓRIO)
+# Regra do supervisório: parênteses externos obrigatórios
 # =========================
 def _fix_parentheses(s: str) -> str:
-    """
-    Corrige parênteses desbalanceados mantendo parênteses internos.
-    - Ignora ')' sobrando antes de qualquer '('
-    - Fecha todos os '(' abertos no final
-    """
     s = (s or "").strip()
     if not s:
         return s
@@ -107,22 +109,16 @@ def _fix_parentheses(s: str) -> str:
         else:
             cleaned.append(ch)
 
-    s = "".join(cleaned)
+    s2 = "".join(cleaned)
     if open_count > 0:
-        s = s + (")" * open_count)
-    return s
+        s2 += (")" * open_count)
+    return s2
 
 def normalize_supervisor_field(text: str) -> str:
-    """
-    Garante UM par de parênteses externos obrigatório:
-    - Se já tiver ( ... ), não duplica
-    - Se faltar abrir/fechar, corrige
-    - Mantém parênteses internos (ex: (P-410))
-    """
     s = (text or "").strip().upper()
     s = _fix_parentheses(s)
 
-    # se já tiver par externo, remove pra reconstruir sem duplicar
+    # remove par externo se já existir, pra não duplicar
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
 
@@ -130,10 +126,7 @@ def normalize_supervisor_field(text: str) -> str:
     return f"({s})" if s else "()"
 
 def clean_prefix_desc(prefix_desc: str) -> str:
-    """
-    Prefixo da base pode vir com "(" no final.
-    Remove lixo final pra ficar: "MOTOR ELETRICO" / "TRANSMISSOR ...", etc.
-    """
+    # remove "(" pendurado no final, etc.
     s = (prefix_desc or "").strip().upper()
     s = re.sub(r"\(\s*$", "", s).strip()
     s = re.sub(r"[\-:]\s*$", "", s).strip()
@@ -141,19 +134,12 @@ def clean_prefix_desc(prefix_desc: str) -> str:
     return s
 
 def build_manual_description(prefix_desc: str, supervisor_text: str) -> str:
-    """
-    Monta: PREFIX_DESC + (SUPERVISÓRIO corrigido)
-    Ex: MOTOR ELETRICO + BOMBA (P-410  -> MOTOR ELETRICO (BOMBA (P-410))
-    """
     p = clean_prefix_desc(prefix_desc)
     sup = normalize_supervisor_field(supervisor_text)
     return f"{p} {sup}".strip() if p else sup
 
 def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
-    """
-    Remove (PREFIXO) caso apareça e seja igual ao prefixo da TAG.
-    Ex: "MOTOR ELETRICO (ME) (BOMBA...)" -> "MOTOR ELETRICO (BOMBA...)"
-    """
+    # remove (ME), (TIT), etc quando for igual ao prefixo da TAG
     t = (tag or "").strip().upper()
     d = (desc_final or "").strip().upper()
     pfx = get_prefix(t)
@@ -164,7 +150,7 @@ def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
     return d
 
 # =========================
-# Persistência simples (JSON)
+# Allowlist + cache bases (JSON)
 # =========================
 def load_allowlist():
     if os.path.exists(ALLOWLIST_FILE):
@@ -202,13 +188,66 @@ def load_bases_cache():
     return {}, {}, ""
 
 # =========================
-# Session State
+# Google Sheets LOG
+# =========================
+def get_gs_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=scopes
+    )
+    return gspread.authorize(creds)
+
+def get_log_worksheet():
+    gc = get_gs_client()
+    sheet_id = st.secrets["log_sheet"]["spreadsheet_id"]
+    ws_name = st.secrets["log_sheet"].get("worksheet", "LOG")
+    sh = gc.open_by_key(sheet_id)
+    ws = sh.worksheet(ws_name)
+
+    # garante cabeçalho
+    try:
+        a1 = ws.acell("A1").value
+    except Exception:
+        a1 = None
+
+    if (a1 or "").strip().upper() != "DATA_HORA":
+        ws.update("A1:F1", [[
+            "DATA_HORA", "USUARIO", "TAG", "DESCRICAO_FINAL", "STATUS", "LAYOUT"
+        ]])
+    return ws
+
+def append_log_rows_gs(rows):
+    # rows: list[list] => [DATA_HORA, USUARIO, TAG, DESCRICAO_FINAL, STATUS, LAYOUT]
+    ws = get_log_worksheet()
+    ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+def export_log_xlsx_from_gs() -> bytes:
+    ws = get_log_worksheet()
+    values = ws.get_all_values()
+
+    wb = Workbook()
+    sh = wb.active
+    sh.title = "LOG"
+    for row in values:
+        sh.append(row)
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+# =========================
+# Session state
 # =========================
 def ensure_state():
     if "auth" not in st.session_state:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
 
-    # LISTA POR USUÁRIO
+    # lista por usuário (não é geral)
     if "items_by_user" not in st.session_state:
         st.session_state["items_by_user"] = {}  # user -> list[dict]
 
@@ -220,10 +259,6 @@ def ensure_state():
         st.session_state["base_tags"] = bt
         st.session_state["base_prefix"] = bp
         st.session_state["bases_saved_at"] = saved_at
-
-    # RELATÓRIO POR USUÁRIO (último PDF gerado por cada user)
-    if "report_by_user" not in st.session_state:
-        st.session_state["report_by_user"] = {}  # user -> {bytes,name,meta}
 
 ensure_state()
 
@@ -237,18 +272,17 @@ def set_user_items(user: str, items):
     st.session_state["items_by_user"][user] = items
 
 # =========================
-# LOGIN SCREEN
+# UI
 # =========================
 st.title("Gerador de Tags")
 
 auth = st.session_state["auth"]
 
+# ---------- LOGIN ----------
 if not auth["logged"]:
     st.subheader("Login")
-
-    u_in = st.text_input("Usuário", value="", placeholder="ex: inpasa")
-    p_in = st.text_input("Senha", value="", type="password", placeholder="ex: inpasa")
-
+    u_in = st.text_input("Usuário", value="", placeholder="ex: JOAO")
+    p_in = st.text_input("Senha", value="", type="password", placeholder="ex: joao123")
     do_login = st.button("Entrar")
 
     if do_login:
@@ -264,7 +298,7 @@ if not auth["logged"]:
             st.session_state["auth"] = {"logged": True, "role": "admin", "user": "ADMIN"}
             st.rerun()
 
-        # user comum
+        # user normal
         if p.lower() == user_password_rule(u).lower():
             user_norm = norm_user(u)
             allow = st.session_state["allowlist"]
@@ -279,17 +313,15 @@ if not auth["logged"]:
 
     st.stop()
 
-# =========================
-# AUTH OK
-# =========================
+# ---------- AUTH OK ----------
 role = auth["role"]
 user = auth["user"]
 is_admin = (role == "admin")
 
-topcol1, topcol2 = st.columns([3, 1])
-with topcol1:
+top1, top2 = st.columns([3, 1])
+with top1:
     st.caption(f"Logado como: **{user}**  | Perfil: **{role.upper()}**")
-with topcol2:
+with top2:
     if st.button("Sair"):
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
         st.rerun()
@@ -298,7 +330,7 @@ with topcol2:
 # ADMIN PANEL
 # =========================
 if is_admin:
-    with st.expander("🔒 Admin — Bases + Usuários + Relatórios", expanded=False):
+    with st.expander("🔒 Admin — Bases + Usuários + LOG", expanded=False):
         st.markdown("### Bases (somente admin)")
         colA, colB = st.columns([1, 1], gap="large")
 
@@ -350,10 +382,10 @@ if is_admin:
                     st.stop()
 
                 for r in rowsp:
-                    p = (str(r[i_pfx]).strip().upper() if i_pfx < len(r) and r[i_pfx] is not None else "")
+                    pfx = (str(r[i_pfx]).strip().upper() if i_pfx < len(r) and r[i_pfx] is not None else "")
                     pdsc = (str(r[i_pd]).strip() if i_pd < len(r) and r[i_pd] is not None else "")
-                    if p:
-                        base_prefix[p] = pdsc.upper().strip()
+                    if pfx:
+                        base_prefix[pfx] = pdsc.upper().strip()
 
             st.session_state["base_tags"] = base_tags
             st.session_state["base_prefix"] = base_prefix
@@ -377,22 +409,17 @@ if is_admin:
             st.success(f"Allowlist salva ({len(st.session_state['allowlist'])} usuários).")
 
         st.divider()
-        st.markdown("### Relatórios XLSX (somente admin)")
-        rep_map = st.session_state["report_by_user"]
-        rep_users = sorted(rep_map.keys())
-        if rep_users:
-            sel = st.selectbox("Escolha o usuário do relatório", options=rep_users, index=0)
-            rep = rep_map.get(sel) or {}
+        st.markdown("### LOG completo (Google Sheets) — somente admin")
+        try:
+            xbytes = export_log_xlsx_from_gs()
             st.download_button(
-                "Baixar relatório do último PDF deste usuário",
-                data=rep.get("bytes", b""),
-                file_name=rep.get("name", f"relatorio_{sel}.xlsx"),
+                "Baixar LOG completo (XLSX)",
+                data=xbytes,
+                file_name=f"log_tags_{now_str().replace(':','-').replace(' ','_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            meta = rep.get("meta") or {}
-            st.caption(f"Gerado em: {meta.get('ts','—')} | por: {meta.get('user','—')} | itens: {meta.get('count','—')}")
-        else:
-            st.info("Nenhum relatório gerado ainda.")
+        except Exception as e:
+            st.error(f"Falha ao ler LOG do Google Sheets: {e}")
 
 st.divider()
 
@@ -415,7 +442,7 @@ manual_flag = False
 base_desc = ""
 
 if tag:
-    base_desc = base_tags.get(tag, "")
+    base_desc = (base_tags.get(tag, "") or "").strip().upper()
 
     if base_desc:
         st.info("TAG encontrada na base.")
@@ -447,6 +474,7 @@ if st.button("Adicionar à lista"):
     else:
         items = get_user_items(user)
         now = now_str()
+
         changed = bool(base_desc and (desc_in.strip().upper() != base_desc.strip().upper()))
 
         updated = False
@@ -457,7 +485,7 @@ if st.button("Adicionar à lista"):
                     "layout": layout_name,
                     "manual": bool(manual_flag),
                     "changed": bool(changed),
-                    "base_desc": base_desc.strip().upper(),
+                    "base_desc": base_desc,
                     "updated_at": now,
                     "updated_by": user,
                 })
@@ -471,7 +499,7 @@ if st.button("Adicionar à lista"):
                 "layout": layout_name,
                 "manual": bool(manual_flag),
                 "changed": bool(changed),
-                "base_desc": base_desc.strip().upper(),
+                "base_desc": base_desc,
                 "created_at": now,
                 "created_by": user,
                 "updated_at": now,
@@ -484,9 +512,9 @@ if st.button("Adicionar à lista"):
 st.divider()
 
 # =========================
-# STEP 3 (somente limpar + pdf) — POR USUÁRIO
+# STEP 3 — usuário normal só limpa + baixa PDF
 # =========================
-st.subheader("3) Lista atual")
+st.subheader("3) Lista atual (sua lista)")
 
 items = get_user_items(user)
 
@@ -517,40 +545,24 @@ with c1:
 
 with c2:
     if items:
+        # ✅ LOG: grava no Google Sheets SOMENTE quando gera PDF
+        ts_pdf = now_str()
+        rows_log = []
+        for it in items:
+            status = "MANUAL" if it.get("manual") else ("ALTERADO" if it.get("changed") else "BASE")
+            layout = "150×150" if it.get("layout") == "big" else "100×50"
+            rows_log.append([ts_pdf, user, it["tag"], it["desc"], status, layout])
+
+        try:
+            append_log_rows_gs(rows_log)
+        except Exception as e:
+            st.error(f"Falha ao gravar LOG no Google Sheets: {e}")
+            st.stop()
+
         pdf_bytes = build_pdf_bytes_mixed([
             (it["tag"], it["desc"], it.get("layout", "small"))
             for it in items
         ])
-
-        # relatório do último PDF (salvo por usuário; admin baixa no painel)
-        ts_pdf = now_str()
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "RELATORIO"
-        ws.append(["DATA_HORA_PDF", "USUARIO_PDF", "TAG", "DESCRIÇÃO_FINAL", "LAYOUT", "STATUS", "DESCRIÇÃO_BASE"])
-
-        for it in items:
-            status = "MANUAL" if it.get("manual") else ("ALTERADO" if it.get("changed") else "OK")
-            ws.append([
-                ts_pdf,
-                user,
-                it["tag"],
-                it["desc"],
-                "150×150" if it.get("layout") == "big" else "100×50",
-                status,
-                it.get("base_desc", "") if it.get("base_desc") else "",
-            ])
-
-        bio = io.BytesIO()
-        wb.save(bio)
-        bio.seek(0)
-
-        rep_name = f"relatorio_tags_{user}_{ts_pdf.replace(':','-').replace(' ','_')}.xlsx"
-        st.session_state["report_by_user"][user] = {
-            "bytes": bio.getvalue(),
-            "name": rep_name,
-            "meta": {"ts": ts_pdf, "user": user, "count": len(items)}
-        }
 
         st.download_button(
             "Gerar/baixar PDF",
@@ -560,4 +572,3 @@ with c2:
         )
     else:
         st.button("Gerar/baixar PDF", disabled=True)
-
