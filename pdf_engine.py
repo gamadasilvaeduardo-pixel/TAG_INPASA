@@ -11,7 +11,7 @@ from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.utils import ImageReader
 
-# ✅ QR compatível (ReportLab 4.x)
+# ✅ QR compatível (ReportLab 4.4+)
 from reportlab.graphics.barcode import qr as _qr
 from reportlab.graphics import renderPDF
 from reportlab.graphics.shapes import Drawing
@@ -22,7 +22,7 @@ from reportlab.graphics.shapes import Drawing
 # =========================================================
 
 # TAG pequena (100x50): subir TAG (mm)
-TAG_SMALL_Y_OFFSET_MM = 3.0  # ajuste aqui
+TAG_SMALL_Y_OFFSET_MM = 3.0  # ajuste aqui (ex: 4.0 sobe mais)
 
 # Margens do A4 (mm)
 PAGE_MARGIN_MM = 6.0
@@ -69,8 +69,10 @@ def _try_load_logo_reader():
                 pass
     return None
 
+
 def _string_width(text: str, font_name: str, font_size: int) -> float:
     return pdfmetrics.stringWidth(text or "", font_name, font_size)
+
 
 def _fit_font_size(text: str, font_name: str, max_size: int, min_size: int, max_width_pt: float) -> int:
     text = (text or "").strip()
@@ -83,7 +85,11 @@ def _fit_font_size(text: str, font_name: str, max_size: int, min_size: int, max_
         size -= 1
     return min_size
 
+
 def _draw_qr(c: canvas.Canvas, data: str, x: float, y: float, size_pt: float):
+    """
+    QR compatível com ReportLab 4.4+ (sem usar .scale() no widget).
+    """
     qrw = _qr.QrCodeWidget(data or "")
     bounds = qrw.getBounds()
     w = bounds[2] - bounds[0]
@@ -91,10 +97,24 @@ def _draw_qr(c: canvas.Canvas, data: str, x: float, y: float, size_pt: float):
     if w <= 0 or h <= 0:
         return
 
+    sx = size_pt / w
+    sy = size_pt / h
+
     d = Drawing(size_pt, size_pt)
     d.add(qrw)
-    qrw.scale(size_pt / w, size_pt / h)
-    renderPDF.draw(d, c, x, y)
+
+    # Ajusta origem do widget (ele não nasce em 0,0)
+    qrw.x = -bounds[0]
+    qrw.y = -bounds[1]
+
+    # Escala no drawing (não no widget)
+    try:
+        d.scale(sx, sy)
+        renderPDF.draw(d, c, x, y)
+    except Exception:
+        # fallback ultra-compatível
+        renderPDF.draw(d, c, x, y, showBoundary=False, transform=[sx, 0, 0, sy, 0, 0])
+
 
 def _draw_border(c: canvas.Canvas, x: float, y: float, w: float, h: float):
     c.setLineWidth(BORDER_LINE_WIDTH)
