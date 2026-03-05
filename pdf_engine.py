@@ -32,6 +32,15 @@ LOGO_PNG_B64 = (
 # PRESETS (iguais ao print) — só SMALL e SQUARE
 # =========================================================
 DEFAULTS = {
+    "small": {
+    ...
+    "tag_top_mm": 3.0
+},
+
+"square": {
+    ...
+    "tag_top_mm": 10.0
+}
     "gap_mm": 0.5,
     "font_tag": "Helvetica-Bold",
     "font_foot": "Helvetica-Bold",
@@ -343,3 +352,4 @@ def build_pdf_bytes_mixed(items):
     c.save()
     bio.seek(0)
     return bio.getvalue()
+
