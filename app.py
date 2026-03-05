@@ -7,6 +7,7 @@ import os
 import json
 import streamlit as st
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from openpyxl import load_workbook, Workbook
 
 import gspread
@@ -16,22 +17,38 @@ from pdf_engine import build_pdf_bytes_mixed
 
 st.set_page_config(page_title="Gerador de Tags", layout="wide")
 
+# =========================
+# TIMEZONE (Brasília) — ajuste mais simples e confiável
+# =========================
+BR_TZ = ZoneInfo("America/Sao_Paulo")
+
+def now_str():
+    return datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+# =========================
+# AUTH (simples)
+# =========================
 ADMIN_USER = "admin"
 ADMIN_PASS = "cpcm123"
 
+# =========================
+# Persistência simples (JSON local do app)
+# (permitidos / cache bases)
+# =========================
 ALLOWLIST_FILE = "users_allowlist.json"
 BASE_CACHE_FILE = "bases_cache.json"
-
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def norm_user(s: str) -> str:
     return (s or "").strip().upper()
 
 def user_password_rule(username: str) -> str:
+    # usuário normal: senha = <usuario>123
     u = (username or "").strip().lower()
     return f"{u}123"
 
+# =========================
+# TAG helpers
+# =========================
 def norm_tag(s: str) -> str:
     s = (s or "").strip()
     s = s.replace("_", "-")
@@ -42,6 +59,9 @@ def get_prefix(tag: str) -> str:
     m = re.match(r"^([A-Z]+)", (tag or "").upper())
     return m.group(1) if m else ""
 
+# =========================
+# XLSX helpers (sem pandas)
+# =========================
 def list_sheets(uploaded_file):
     if uploaded_file is None:
         return []
@@ -74,6 +94,9 @@ def idx_of(headers_list, *names):
             return headers_list.index(n)
     return None
 
+# =========================
+# Regra do supervisório: parênteses externos obrigatórios
+# =========================
 def _fix_parentheses(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -100,8 +123,11 @@ def _fix_parentheses(s: str) -> str:
 def normalize_supervisor_field(text: str) -> str:
     s = (text or "").strip().upper()
     s = _fix_parentheses(s)
+
+    # remove par externo se já existir, pra não duplicar
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
+
     s = _fix_parentheses(s)
     return f"({s})" if s else "()"
 
@@ -118,6 +144,7 @@ def build_manual_description(prefix_desc: str, supervisor_text: str) -> str:
     return f"{p} {sup}".strip() if p else sup
 
 def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
+    # remove (ME), (TIT), etc quando for igual ao prefixo da TAG
     t = (tag or "").strip().upper()
     d = (desc_final or "").strip().upper()
     pfx = get_prefix(t)
@@ -127,6 +154,9 @@ def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
     d = re.sub(r"\s+", " ", d).strip()
     return d
 
+# =========================
+# Allowlist + cache bases (JSON)
+# =========================
 def load_allowlist():
     if os.path.exists(ALLOWLIST_FILE):
         try:
@@ -182,11 +212,13 @@ def get_log_worksheet():
     ws_name = st.secrets["log_sheet"].get("worksheet", "LOG")
     sh = gc.open_by_key(sheet_id)
 
+    # tenta abrir aba; se não existir, cria
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
         ws = sh.add_worksheet(title=ws_name, rows=2000, cols=10)
 
+    # garante cabeçalho
     try:
         a1 = ws.acell("A1").value
     except Exception:
@@ -217,15 +249,46 @@ def export_log_xlsx_from_gs() -> bytes:
     bio.seek(0)
     return bio.getvalue()
 
+def clear_user_log(username: str) -> int:
+    """
+    Remove do LOG do Google Sheets todas as linhas cujo USUARIO == username
+    Mantém cabeçalho.
+    Retorna quantidade removida.
+    """
+    ws = get_log_worksheet()
+    values = ws.get_all_values()
+
+    if not values:
+        return 0
+
+    header = values[0]
+    rows = values[1:]
+
+    user_u = (username or "").strip().upper()
+
+    kept = [header]
+    removed = 0
+    for r in rows:
+        u = (r[1] if len(r) >= 2 else "").strip().upper()
+        if u == user_u:
+            removed += 1
+        else:
+            kept.append(r)
+
+    ws.clear()
+    ws.update("A1", kept)
+    return removed
+
 # =========================
-# Session state (com chaves estáveis)
+# Session state (com chaves estáveis p/ não dar KeyError)
 # =========================
 def ensure_state():
     if "auth" not in st.session_state:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
 
+    # lista por usuário (não é geral)
     if "items_by_user" not in st.session_state:
-        st.session_state["items_by_user"] = {}
+        st.session_state["items_by_user"] = {}  # user -> list[dict]
 
     if "allowlist" not in st.session_state:
         st.session_state["allowlist"] = load_allowlist()
@@ -236,6 +299,7 @@ def ensure_state():
         st.session_state["base_prefix"] = bp
         st.session_state["bases_saved_at"] = saved_at
 
+    # ✅ chaves estáveis pros widgets do login
     st.session_state.setdefault("login_user", "")
     st.session_state.setdefault("login_pass", "")
 
@@ -260,9 +324,10 @@ auth = st.session_state["auth"]
 # ---------- LOGIN ----------
 if not auth["logged"]:
     st.subheader("Login")
+
     with st.form("login_form", clear_on_submit=False):
-        u_in = st.text_input("Usuário", key="login_user", placeholder="ex: inpasa")
-        p_in = st.text_input("Senha", key="login_pass", type="password")
+        u_in = st.text_input("Usuário", key="login_user", value=st.session_state["login_user"], placeholder="")
+        p_in = st.text_input("Senha", key="login_pass", value=st.session_state["login_pass"], type="password", placeholder="")
         do_login = st.form_submit_button("Entrar")
 
     if do_login:
@@ -273,10 +338,12 @@ if not auth["logged"]:
             st.error("Informe usuário e senha.")
             st.stop()
 
+        # admin
         if u.lower() == ADMIN_USER and p == ADMIN_PASS:
             st.session_state["auth"] = {"logged": True, "role": "admin", "user": "ADMIN"}
             st.rerun()
 
+        # user normal
         if p.lower() == user_password_rule(u).lower():
             user_norm = norm_user(u)
             allow = st.session_state["allowlist"]
@@ -307,7 +374,7 @@ with top2:
         st.rerun()
 
 # =========================
-# ADMIN
+# ADMIN PANEL
 # =========================
 if is_admin:
     with st.expander("🔒 Admin — Bases + Usuários + LOG", expanded=False):
@@ -321,12 +388,7 @@ if is_admin:
                 key="up_base"
             )
             base_sheets = list_sheets(up_base)
-            base_sheet = st.selectbox(
-                "Aba da Base principal",
-                options=base_sheets or ["(envie o arquivo)"],
-                index=0,
-                key="sel_base_sheet"
-            )
+            base_sheet = st.selectbox("Aba da Base principal", options=base_sheets or ["(envie o arquivo)"], index=0, key="base_sheet")
 
         with colB:
             up_prefix = st.file_uploader(
@@ -335,12 +397,7 @@ if is_admin:
                 key="up_prefix"
             )
             pref_sheets = list_sheets(up_prefix)
-            pref_sheet = st.selectbox(
-                "Aba da Base prefixos",
-                options=pref_sheets or ["(envie o arquivo)"],
-                index=0,
-                key="sel_pref_sheet"
-            )
+            pref_sheet = st.selectbox("Aba da Base prefixos", options=pref_sheets or ["(envie o arquivo)"], index=0, key="pref_sheet")
 
         if st.button("Salvar bases", key="btn_save_bases"):
             base_tags = {}
@@ -394,7 +451,7 @@ if is_admin:
         current = st.session_state["allowlist"]
         txt = st.text_area("1 usuário por linha", value="\n".join(current), height=160, key="txt_allowlist")
         if st.button("Salvar allowlist", key="btn_save_allowlist"):
-            users = [line.strip() for line in (txt or "").splitlines() if line.strip()]
+            users = [line.strip() for line in txt.splitlines() if line.strip()]
             st.session_state["allowlist"] = save_allowlist(users)
             st.success(f"Allowlist salva ({len(st.session_state['allowlist'])} usuários).")
 
@@ -407,10 +464,34 @@ if is_admin:
                 data=xbytes,
                 file_name=f"log_tags_{now_str().replace(':','-').replace(' ','_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="btn_dl_log_xlsx"
+                key="btn_dl_log"
             )
         except Exception as e:
             st.error(f"Falha ao ler LOG do Google Sheets: {e}")
+
+        st.divider()
+        st.markdown("### Limpar LOG de usuário (Google Sheets) — somente admin")
+
+        try:
+            ws = get_log_worksheet()
+            vals = ws.get_all_values()
+            users_log = sorted({r[1].strip().upper() for r in vals[1:] if len(r) >= 2 and str(r[1]).strip()})
+            if not users_log:
+                st.info("Não há usuários no LOG para limpar.")
+            else:
+                user_to_clear = st.selectbox("Usuário para limpar", options=users_log, key="sel_clear_user")
+
+                cA, cB = st.columns([1, 2])
+                with cA:
+                    do_clear = st.button("Limpar LOG deste usuário", key="btn_clear_user_log")
+                with cB:
+                    st.caption("Remove todas as linhas do LOG onde USUARIO = usuário selecionado. Mantém cabeçalho e demais usuários.")
+
+                if do_clear:
+                    removed = clear_user_log(user_to_clear)
+                    st.success(f"OK — removidos {removed} registros do usuário {user_to_clear}.")
+        except Exception as e:
+            st.error(f"Falha ao carregar usuários do LOG: {e}")
 
 st.divider()
 
@@ -425,6 +506,7 @@ base_prefix = st.session_state["base_prefix"]
 tag_raw = st.text_input("TAG", value="", placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019", key="inp_tag")
 tag = norm_tag(tag_raw)
 
+# Só 2 layouts
 is_square = st.checkbox("TAG QUADRADA (150×150)", value=False, key="chk_square")
 layout_name = "square" if is_square else "small"
 
@@ -465,7 +547,7 @@ if st.button("Adicionar à lista", key="btn_add"):
         st.error("Informe a descrição.")
     else:
         items = get_user_items(user)
-        now = now_str()
+        ts = now_str()
 
         changed = bool(base_desc and (desc_in.strip().upper() != base_desc.strip().upper()))
 
@@ -478,7 +560,7 @@ if st.button("Adicionar à lista", key="btn_add"):
                     "manual": bool(manual_flag),
                     "changed": bool(changed),
                     "base_desc": base_desc,
-                    "updated_at": now,
+                    "updated_at": ts,
                     "updated_by": user,
                 })
                 updated = True
@@ -492,9 +574,9 @@ if st.button("Adicionar à lista", key="btn_add"):
                 "manual": bool(manual_flag),
                 "changed": bool(changed),
                 "base_desc": base_desc,
-                "created_at": now,
+                "created_at": ts,
                 "created_by": user,
-                "updated_at": now,
+                "updated_at": ts,
                 "updated_by": user,
             })
 
@@ -502,8 +584,8 @@ if st.button("Adicionar à lista", key="btn_add"):
         st.success("Adicionado/atualizado.")
 
 st.divider()
-st.subheader("3) Lista atual (sua lista)")
 
+st.subheader("3) Lista atual (sua lista)")
 items = get_user_items(user)
 
 if items:
@@ -527,7 +609,7 @@ else:
 c1, c2 = st.columns([1, 1])
 
 with c1:
-    if st.button("Limpar lista", key="btn_clear"):
+    if st.button("Limpar lista", key="btn_clear_list"):
         set_user_items(user, [])
         st.success("Sua lista foi limpa.")
 
@@ -549,6 +631,7 @@ with c2:
             st.error(f"Falha ao gerar PDF: {e}")
             st.stop()
 
+        # log só quando clica pra baixar
         def _on_download():
             append_log_rows_gs(rows_log)
 
