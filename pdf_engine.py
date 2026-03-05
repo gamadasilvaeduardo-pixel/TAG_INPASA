@@ -1,7 +1,6 @@
 # pdf_engine.py
 # -*- coding: utf-8 -*-
 
-import os
 import io
 import base64
 from pathlib import Path
@@ -19,7 +18,7 @@ from PIL import Image
 from xml.sax.saxutils import escape as xml_escape
 
 # =========================================================
-# LOGO embutido (fallback) — igual seu v2.4.6
+# LOGO embutido (fallback)
 # =========================================================
 LOGO_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAARgAAAB4CAYAAACD9l0bAAAACXBIWXMAAAsSAAALEgHS3X78AAAB"
@@ -44,10 +43,10 @@ DEFAULTS = {
         "pad": 4.0, "thick": 1.0,
         "qr": 18.0, "qr_margin": 2.0,
         "logo_w": 50.0,
-        "tag_fs_max": 32.0,   # ✅ do print
-        "tag_fs_min": 14.0,   # ✅ do print
+        "tag_fs_max": 32.0,   # do print
+        "tag_fs_min": 14.0,   # do print
         "foot_fs_min": 8.0, "foot_fs_max": 14.0,
-        "tag_y_offset_mm": 3.5,  # ✅ sobe a TAG (ajuste fino)
+        # ✅ regra nova: topo do texto a 3mm da borda superior (não precisa offset)
     },
 
     # TAG QUADRADA (150x150)
@@ -57,11 +56,11 @@ DEFAULTS = {
         "pad": 15.0, "thick": 1.8,
         "qr": 38.0, "qr_margin": 10.0,
         "logo_w": 85.0,
-        "tag_fs_max": 52.0,   # ✅ do print
-        "tag_fs_min": 22.0,   # ✅ do print
+        "tag_fs_max": 52.0,   # do print
+        "tag_fs_min": 22.0,   # do print
         "foot_fs_min": 8.0, "foot_fs_max": 20.0,
         "logo_between_left_and_qr": 1.0,
-        "tag_y_offset_mm": 3.5,  # ✅ sobe a TAG (ajuste fino)
+        # ✅ regra nova: topo do texto a 3mm da borda superior
     }
 }
 
@@ -79,8 +78,8 @@ def _string_width(text: str, font_name: str, font_size: float) -> float:
 
 def _fit_tag_font(tag_text: str, font_name: str, fs_max: float, fs_min: float, max_width_pt: float) -> float:
     """
-    ✅ Sem truncar/sem "..."
-    ✅ Só reduz fonte até caber na largura útil
+    Sem truncar/sem "..."
+    Só reduz fonte até caber na largura útil.
     """
     t = (tag_text or "").strip()
     if not t:
@@ -92,6 +91,17 @@ def _fit_tag_font(tag_text: str, font_name: str, fs_max: float, fs_min: float, m
             return fs
         fs -= 0.5
     return fs_min
+
+def _font_ascent_pt(font_name: str, font_size: float) -> float:
+    """
+    Retorna ascent em pontos (pt) para posicionar o TOPO do texto com precisão.
+    """
+    try:
+        a = pdfmetrics.getAscent(font_name)  # em 1/1000 em
+        return (a / 1000.0) * float(font_size)
+    except Exception:
+        # fallback razoável (Helvetica costuma ser ~0.72-0.75)
+        return float(font_size) * 0.75
 
 def qr_bytes(text, box_size=8, border=1):
     img = qrcode.make(
@@ -107,7 +117,6 @@ def qr_bytes(text, box_size=8, border=1):
 
 def load_logo_image():
     """
-    ✅ Mesmo comportamento do seu script:
     - se existir LOGO_INPASA.png ao lado do pdf_engine.py, usa
     - senão, usa base64 fallback
     """
@@ -125,7 +134,7 @@ def load_logo_image():
     return io.BytesIO(base64.b64decode(LOGO_PNG_B64))
 
 # =========================================================
-# Desenho da etiqueta (igual sua lógica; só TAG mudou)
+# Desenho da etiqueta (igual sua lógica; TAG agora tem regra 3mm)
 # =========================================================
 def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, desc_text: str):
     W = layout["W"] * U
@@ -151,14 +160,11 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
     qy = foot + qr_m
     c.drawImage(ImageReader(qr_bytes(tag_text)), qx, qy, width=qr_s, height=qr_s, mask="auto")
 
-    # ---------- TAG (PATCH):
-    # ✅ centralizado
-    # ✅ sobe um pouco (tag_y_offset_mm)
-    # ✅ auto-fit (não extrapola margem)
+    # ---------- TAG (REGRA NOVA):
+    # topo do texto sempre a 3mm da borda superior da etiqueta
     center_x = W / 2.0
 
-    # largura útil (não deixa encostar na borda)
-    # OBS: mantém a lógica original (não “foge” do QR); só garante não estourar a moldura
+    # largura útil: não encosta na borda
     max_w = W - (2.0 * pad)
 
     tag_fs = _fit_tag_font(
@@ -171,12 +177,15 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
 
     c.setFont(font_tag, tag_fs)
 
-    # mesma fórmula do seu script + offset pra subir
-    y_off = float(layout.get("tag_y_offset_mm", 0.0)) * U
-    ty = foot + avail - pad - tag_fs * 0.90 + y_off
+    # topo do texto (ascent) a 3mm do topo da etiqueta
+    top_target_y = H - (3.0 * U)  # 3mm da borda superior
+    ascent = _font_ascent_pt(font_tag, tag_fs)
+    ty = top_target_y - ascent  # baseline
 
-    # clamp pra não bater no topo e não cair dentro do rodapé
-    ty = _clamp(ty, foot + 2 * U, H - pad - tag_fs)
+    # trava pra não invadir rodapé e não sair pela borda
+    ty_min = foot + 2.0 * U
+    ty_max = H - (3.0 * U)  # baseline nunca pode passar do topo alvo
+    ty = _clamp(ty, ty_min, ty_max)
 
     c.drawCentredString(center_x, ty, (tag_text or "").strip())
 
@@ -271,48 +280,6 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         p.drawOn(c, pad, y)
 
 # =========================================================
-# Folha A4 (preenche grid; sobras em branco) — igual sua lógica
-# =========================================================
-def make_pdf_sheet_fill_bytes(layout: dict, cfg: dict, items, gap_mm: float) -> bytes:
-    A4W, A4H = 210.0, 297.0
-    cols, rows = int(layout["cols"]), int(layout["rows"])
-    W, H = float(layout["W"]), float(layout["H"])
-    g = float(gap_mm)
-    t = float(layout["thick"])
-
-    stepX = W + (g + t)
-    stepY = H + (g + t)
-    need_w = cols * W + (cols - 1) * (g + t)
-    need_h = rows * H + (rows - 1) * (g + t)
-    ml = (A4W - need_w) / 2.0
-    mt = (A4H - need_h) / 2.0
-
-    bio = io.BytesIO()
-    c = canvas.Canvas(bio, pagesize=(A4W * U, A4H * U))
-
-    idx = 0
-    total = len(items)
-    while idx < total or total == 0:
-        for r in range(rows):
-            for cc in range(cols):
-                x0 = (ml + cc * stepX) * U
-                y0 = (A4H - mt - H - r * stepY) * U
-                c.saveState()
-                c.translate(x0, y0)
-                if idx < total:
-                    tag, desc = items[idx]
-                    draw_one_label(c, layout, cfg, str(tag).strip(), str(desc).strip())
-                    idx += 1
-                c.restoreState()
-        c.showPage()
-        if total == 0:
-            break
-
-    c.save()
-    bio.seek(0)
-    return bio.getvalue()
-
-# =========================================================
 # API pro Streamlit
 # =========================================================
 def build_pdf_bytes_mixed(items):
@@ -323,8 +290,6 @@ def build_pdf_bytes_mixed(items):
     """
     cfg = {"font_tag": DEFAULTS["font_tag"], "font_foot": DEFAULTS["font_foot"]}
 
-    # separa por layout e gera em sequência
-    # (pra manter previsível: small primeiro na ordem, depois square na ordem)
     small_items = []
     square_items = []
 
@@ -335,8 +300,6 @@ def build_pdf_bytes_mixed(items):
         else:
             small_items.append((tag, desc))
 
-    # monta pdf final concatenando páginas via canvas: aqui a forma simples é gerar 2 PDFs e juntar
-    # sem libs extras: gera tudo em 1 canvas desenhando por layout em sequência
     A4W, A4H = 210.0, 297.0
     bio = io.BytesIO()
     c = canvas.Canvas(bio, pagesize=(A4W * U, A4H * U))
@@ -380,5 +343,3 @@ def build_pdf_bytes_mixed(items):
     c.save()
     bio.seek(0)
     return bio.getvalue()
-
-
