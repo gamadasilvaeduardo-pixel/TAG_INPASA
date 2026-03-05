@@ -281,8 +281,8 @@ auth = st.session_state["auth"]
 # ---------- LOGIN ----------
 if not auth["logged"]:
     st.subheader("Login")
-    u_in = st.text_input("Usuário", value="", placeholder="ex: JOAO")
-    p_in = st.text_input("Senha", value="", type="password", placeholder="ex: joao123")
+    u_in = st.text_input("Usuário", value="", placeholder="")
+    p_in = st.text_input("Senha", value="", type="password", placeholder="")
     do_login = st.button("Entrar")
 
     if do_login:
@@ -572,3 +572,4 @@ with c2:
         )
     else:
         st.button("Gerar/baixar PDF", disabled=True)
+
