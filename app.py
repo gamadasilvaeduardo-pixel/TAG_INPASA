@@ -12,25 +12,13 @@ from openpyxl import load_workbook, Workbook
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ========= PDF ENGINE (com proteção pra mostrar erro na tela) =========
-try:
-    from pdf_engine import build_pdf_bytes_mixed
-except Exception as e:
-    st.set_page_config(page_title="Gerador de Tags", layout="wide")
-    st.error(f"Erro ao importar pdf_engine.py: {e}")
-    st.stop()
+from pdf_engine import build_pdf_bytes_mixed
 
 st.set_page_config(page_title="Gerador de Tags", layout="wide")
 
-# =========================
-# AUTH (simples)
-# =========================
 ADMIN_USER = "admin"
 ADMIN_PASS = "cpcm123"
 
-# =========================
-# Persistência simples (JSON local do app)
-# =========================
 ALLOWLIST_FILE = "users_allowlist.json"
 BASE_CACHE_FILE = "bases_cache.json"
 
@@ -44,9 +32,6 @@ def user_password_rule(username: str) -> str:
     u = (username or "").strip().lower()
     return f"{u}123"
 
-# =========================
-# TAG helpers
-# =========================
 def norm_tag(s: str) -> str:
     s = (s or "").strip()
     s = s.replace("_", "-")
@@ -57,9 +42,6 @@ def get_prefix(tag: str) -> str:
     m = re.match(r"^([A-Z]+)", (tag or "").upper())
     return m.group(1) if m else ""
 
-# =========================
-# XLSX helpers (sem pandas)
-# =========================
 def list_sheets(uploaded_file):
     if uploaded_file is None:
         return []
@@ -92,9 +74,6 @@ def idx_of(headers_list, *names):
             return headers_list.index(n)
     return None
 
-# =========================
-# Regra do supervisório: parênteses externos obrigatórios
-# =========================
 def _fix_parentheses(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -121,10 +100,8 @@ def _fix_parentheses(s: str) -> str:
 def normalize_supervisor_field(text: str) -> str:
     s = (text or "").strip().upper()
     s = _fix_parentheses(s)
-
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
-
     s = _fix_parentheses(s)
     return f"({s})" if s else "()"
 
@@ -150,9 +127,6 @@ def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
     d = re.sub(r"\s+", " ", d).strip()
     return d
 
-# =========================
-# Allowlist + cache bases (JSON)
-# =========================
 def load_allowlist():
     if os.path.exists(ALLOWLIST_FILE):
         try:
@@ -208,13 +182,11 @@ def get_log_worksheet():
     ws_name = st.secrets["log_sheet"].get("worksheet", "LOG")
     sh = gc.open_by_key(sheet_id)
 
-    # garante worksheet
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
         ws = sh.add_worksheet(title=ws_name, rows=2000, cols=10)
 
-    # garante cabeçalho
     try:
         a1 = ws.acell("A1").value
     except Exception:
@@ -246,14 +218,14 @@ def export_log_xlsx_from_gs() -> bytes:
     return bio.getvalue()
 
 # =========================
-# Session state (fix Streamlit 1.55 / widget keys)
+# Session state (com chaves estáveis)
 # =========================
 def ensure_state():
     if "auth" not in st.session_state:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
 
     if "items_by_user" not in st.session_state:
-        st.session_state["items_by_user"] = {}  # user -> list[dict]
+        st.session_state["items_by_user"] = {}
 
     if "allowlist" not in st.session_state:
         st.session_state["allowlist"] = load_allowlist()
@@ -288,7 +260,6 @@ auth = st.session_state["auth"]
 # ---------- LOGIN ----------
 if not auth["logged"]:
     st.subheader("Login")
-
     with st.form("login_form", clear_on_submit=False):
         u_in = st.text_input("Usuário", key="login_user", placeholder="ex: inpasa")
         p_in = st.text_input("Senha", key="login_pass", type="password")
@@ -336,7 +307,7 @@ with top2:
         st.rerun()
 
 # =========================
-# ADMIN PANEL
+# ADMIN
 # =========================
 if is_admin:
     with st.expander("🔒 Admin — Bases + Usuários + LOG", expanded=False):
@@ -454,7 +425,6 @@ base_prefix = st.session_state["base_prefix"]
 tag_raw = st.text_input("TAG", value="", placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019", key="inp_tag")
 tag = norm_tag(tag_raw)
 
-# ✅ Somente 2 modelos: 50x100 e 150x150
 is_square = st.checkbox("TAG QUADRADA (150×150)", value=False, key="chk_square")
 layout_name = "square" if is_square else "small"
 
@@ -532,10 +502,6 @@ if st.button("Adicionar à lista", key="btn_add"):
         st.success("Adicionado/atualizado.")
 
 st.divider()
-
-# =========================
-# STEP 3 — lista + PDF (LOG no clique)
-# =========================
 st.subheader("3) Lista atual (sua lista)")
 
 items = get_user_items(user)
@@ -583,7 +549,6 @@ with c2:
             st.error(f"Falha ao gerar PDF: {e}")
             st.stop()
 
-        # grava log só se clicar pra baixar
         def _on_download():
             append_log_rows_gs(rows_log)
 
