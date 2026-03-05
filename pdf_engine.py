@@ -6,7 +6,6 @@ import base64
 from pathlib import Path
 
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm as U
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Paragraph
@@ -29,46 +28,42 @@ LOGO_PNG_B64 = (
 )
 
 # =========================================================
-# PRESETS (iguais ao print) — só SMALL e SQUARE
+# PRESETS — só SMALL (50x100) e SQUARE (150x150)
+# - tag_top_mm controla a DISTÂNCIA DO TOPO do texto da TAG
 # =========================================================
 DEFAULTS = {
-"small": {
-    "tag_top_mm": 3.0
-},
-
-"square": {
-    ...
-    "tag_top_mm": 10.0
-}
     "gap_mm": 0.5,
     "font_tag": "Helvetica-Bold",
     "font_foot": "Helvetica-Bold",
 
-    # TAG 50x100 (2x5) — W=100 / H=50
     "small": {
         "cols": 2, "rows": 5,
         "W": 100.0, "H": 50.0, "footer": 15.0,
         "pad": 4.0, "thick": 1.0,
         "qr": 18.0, "qr_margin": 2.0,
         "logo_w": 50.0,
-        "tag_fs_max": 32.0,   # do print
-        "tag_fs_min": 14.0,   # do print
+        "tag_fs_max": 32.0,
+        "tag_fs_min": 14.0,
         "foot_fs_min": 8.0, "foot_fs_max": 14.0,
-        # ✅ regra nova: topo do texto a 3mm da borda superior (não precisa offset)
+
+        # ✅ topo do texto da TAG a 3mm da borda superior
+        "tag_top_mm": 3.0,
     },
 
-    # TAG QUADRADA (150x150)
     "square": {
         "cols": 1, "rows": 1,
         "W": 150.0, "H": 150.0, "footer": 46.0,
         "pad": 15.0, "thick": 1.8,
         "qr": 38.0, "qr_margin": 10.0,
         "logo_w": 85.0,
-        "tag_fs_max": 52.0,   # do print
-        "tag_fs_min": 22.0,   # do print
+        "tag_fs_max": 52.0,
+        "tag_fs_min": 22.0,
         "foot_fs_min": 8.0, "foot_fs_max": 20.0,
         "logo_between_left_and_qr": 1.0,
-        # ✅ regra nova: topo do texto a 3mm da borda superior
+
+        # ✅ aqui você aumenta pra “descer” mais o texto (mais distância do topo)
+        # Ex: 10mm, 12mm, 15mm…
+        "tag_top_mm": 12.0,
     }
 }
 
@@ -102,13 +97,12 @@ def _fit_tag_font(tag_text: str, font_name: str, fs_max: float, fs_min: float, m
 
 def _font_ascent_pt(font_name: str, font_size: float) -> float:
     """
-    Retorna ascent em pontos (pt) para posicionar o TOPO do texto com precisão.
+    Retorna ascent em pontos para posicionar o TOPO do texto com precisão.
     """
     try:
         a = pdfmetrics.getAscent(font_name)  # em 1/1000 em
         return (a / 1000.0) * float(font_size)
     except Exception:
-        # fallback razoável (Helvetica costuma ser ~0.72-0.75)
         return float(font_size) * 0.75
 
 def qr_bytes(text, box_size=8, border=1):
@@ -142,7 +136,7 @@ def load_logo_image():
     return io.BytesIO(base64.b64decode(LOGO_PNG_B64))
 
 # =========================================================
-# Desenho da etiqueta (igual sua lógica; TAG agora tem regra 3mm)
+# Desenho da etiqueta
 # =========================================================
 def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, desc_text: str):
     W = layout["W"] * U
@@ -161,18 +155,13 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
     c.rect(0, 0, W, H)
     c.line(0, foot, W, foot)
 
-    avail = H - foot
-
     # QR (direita)
     qx = W - qr_m - qr_s
     qy = foot + qr_m
     c.drawImage(ImageReader(qr_bytes(tag_text)), qx, qy, width=qr_s, height=qr_s, mask="auto")
 
-    # ---------- TAG (REGRA NOVA):
-    # topo do texto sempre a 3mm da borda superior da etiqueta
+    # ---------- TAG: topo fixo em mm (tag_top_mm)
     center_x = W / 2.0
-
-    # largura útil: não encosta na borda
     max_w = W - (2.0 * pad)
 
     tag_fs = _fit_tag_font(
@@ -182,22 +171,21 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         float(layout.get("tag_fs_min", 14.0)),
         max_w
     )
-
     c.setFont(font_tag, tag_fs)
 
-    # topo do texto (ascent) a 3mm do topo da etiqueta
-    top_target_y = H - (3.0 * U)  # 3mm da borda superior
+    top_mm = float(layout.get("tag_top_mm", 3.0))  # ✅ aqui controla “distância do topo”
+    top_target_y = H - (top_mm * U)
     ascent = _font_ascent_pt(font_tag, tag_fs)
     ty = top_target_y - ascent  # baseline
 
-    # trava pra não invadir rodapé e não sair pela borda
+    # trava pra não invadir rodapé / não sair da etiqueta
     ty_min = foot + 2.0 * U
-    ty_max = H - (3.0 * U)  # baseline nunca pode passar do topo alvo
+    ty_max = top_target_y
     ty = _clamp(ty, ty_min, ty_max)
 
     c.drawCentredString(center_x, ty, (tag_text or "").strip())
 
-    # ---------- LOGO (igual seu script)
+    # ---------- LOGO
     logo_bio = load_logo_image()
     try:
         img = Image.open(logo_bio)
@@ -205,7 +193,6 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         ar = img.height / img.width
         lh = lw * ar
 
-        # área vertical útil (entre rodapé e o TAG)
         y_low = foot
         y_high = max(ty - 2 * U, y_low + 2 * U)
         max_h = max(4 * U, (y_high - y_low))
@@ -221,17 +208,12 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
             area_left = (thick / 2.0) + gap_txt
             area_right = qx - gap_txt
             usable = max(0.0, area_right - area_left)
-            if usable >= lw:
-                x_logo = area_left + (usable - lw) / 2.0
-            else:
-                x_logo = area_left
+            x_logo = area_left + (usable - lw) / 2.0 if usable >= lw else area_left
         else:
             x_logo = (W - lw) / 2.0
 
-        # alinhar no centro vertical do QR
         qr_cy = qy + (qr_s / 2.0)
-        y_logo = qr_cy - (lh / 2.0)
-        y_logo = _clamp(y_logo, y_low + 1 * U, (y_high - lh))
+        y_logo = _clamp(qr_cy - (lh / 2.0), y_low + 1 * U, (y_high - lh))
 
         logo_bio.seek(0)
         c.drawImage(
@@ -244,7 +226,7 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
     except Exception:
         pass
 
-    # ---------- Rodapé (igual seu script)
+    # ---------- Rodapé (auto-fit)
     fw = W - 2 * pad
     fh = foot - 2 * pad
     if fh < 4:
@@ -257,7 +239,7 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         fontName=font_foot,
         fontSize=10,
         leading=12,
-        alignment=1,        # CENTER
+        alignment=1,
         wordWrap="CJK",
         splitLongWords=1,
     )
@@ -271,7 +253,7 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         style.fontSize = fs_try
         style.leading = fs_try + 2
         p = Paragraph(desc_safe, style)
-        w, h = p.wrap(fw, fh)
+        _, h = p.wrap(fw, fh)
         if h <= fh + 0.1:
             y = pad + (fh - h) / 2.0
             p.drawOn(c, pad, y)
@@ -283,12 +265,12 @@ def draw_one_label(c: canvas.Canvas, layout: dict, cfg: dict, tag_text: str, des
         style.fontSize = fs_min
         style.leading = fs_min + 2
         p = Paragraph(desc_safe, style)
-        w, h = p.wrap(fw, fh)
+        _, h = p.wrap(fw, fh)
         y = pad + max(0, (fh - h) / 2.0)
         p.drawOn(c, pad, y)
 
 # =========================================================
-# API pro Streamlit
+# PDF builder pro Streamlit
 # =========================================================
 def build_pdf_bytes_mixed(items):
     """
@@ -351,5 +333,3 @@ def build_pdf_bytes_mixed(items):
     c.save()
     bio.seek(0)
     return bio.getvalue()
-
-
