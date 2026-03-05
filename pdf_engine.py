@@ -2,344 +2,364 @@
 # -*- coding: utf-8 -*-
 
 import io
-import os
-import base64
+from pathlib import Path
 
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm as U
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.colors import black
+from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.utils import ImageReader
 
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.platypus import Paragraph
-from xml.sax.saxutils import escape as xml_escape
+# ✅ QR compatível (ReportLab 4.x)
+from reportlab.graphics.barcode import qr as _qr
+from reportlab.graphics import renderPDF
+from reportlab.graphics.shapes import Drawing
 
-import qrcode
-from PIL import Image
 
-# Logo fallback (bem simples, pode trocar por arquivo LOGO_INPASA.png)
-LOGO_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAARgAAAB4CAYAAACD9l0bAAAACXBIWXMAAAsSAAALEgHS3X78AAAB"
-    "R0lEQVR4nO3QoQ2DQBBF0Rm3pQJzT3EoJ2C0ahC+2UCRQk0xJb3p2L8B3hYrxQAAAAAAAAAAAOAD"
-    "8w2m2b1S3y1Qkjt3P7H9e3iP7WJQmPz9b7w1f8tWqQ7v8z4h3e+gNw7R5fQeD6w0fQdD6w0fQdD6"
-    "w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w0fQdD6w8cHAAAAAAAAAAAAAHB3"
-    "+g3r8l22m7S3+o7c3n3r3mO9wAAAABJRU5ErkJggg=="
-)
+# =========================================================
+# CONFIG
+# =========================================================
 
-DEFAULTS = {
-    "gap_mm": 0.5,
-    "font_tag": "Helvetica-Bold",
-    "font_foot": "Helvetica-Bold",
+# TAG pequena (100x50): subir TAG (mm)
+TAG_SMALL_Y_OFFSET_MM = 3.0  # ajuste aqui
 
-    # SMALL (mesmo padrão do seu layout W=100, H=50, grid 2x5 A4)
-    "small": {
-        "cols": 2, "rows": 5,
-        "W": 100.0, "H": 50.0, "footer": 15.0,
-        "pad": 4.0, "thick": 1.0,
-        "qr": 18.0, "qr_margin": 2.0,
+# Margens do A4 (mm)
+PAGE_MARGIN_MM = 6.0
 
-        # TAG fonte variável: vai tentar subir até tag_fs_max e descer até tag_fs_min
-        "tag_fs_max": 40.0,
-        "tag_fs_min": 14.0,
+# Logo (arquivo)
+HERE = Path(__file__).resolve().parent
+ASSETS_DIR = HERE / "assets"
+LOGO_CANDIDATES = [
+    ASSETS_DIR / "logo.png",
+    ASSETS_DIR / "logo.jpg",
+    ASSETS_DIR / "logo.jpeg",
+]
 
-        "foot_fs_min": 8.0, "foot_fs_max": 14.0,
-    },
+# Aparência
+BORDER_LINE_WIDTH = 1.0
 
-    # BIG (150x150) = seu “tag grande”
-    "big": {
-        "cols": 1, "rows": 1,
-        "W": 150.0, "H": 150.0, "footer": 46.0,
-        "pad": 15.0, "thick": 1.8,
-        "qr": 38.0, "qr_margin": 10.0,
+# QR sizes
+QR_SMALL_MM = 34.0
+QR_BIG_MM = 60.0
 
-        # LOGO 85.0 (igual seu código original)
-        "logo_w": 85.0,
+# Gaps internos
+INNER_PAD_MM = 3.0
+GAP_LOGO_QR_MM = 3.0
 
-        # TAG fonte variável
-        "tag_fs_max": 56.0,
-        "tag_fs_min": 22.0,
+# Texto
+TAG_FONT = "Helvetica-Bold"
+DESC_FONT = "Helvetica"
+TAG_FONT_MAX = 16
+TAG_FONT_MIN = 6
+DESC_FONT_MAX = 9
+DESC_FONT_MIN = 5
 
-        "foot_fs_min": 8.0, "foot_fs_max": 20.0,
 
-        # logo entre margem esquerda e QR (como seu modelo)
-        "logo_between_left_and_qr": 1.0,
-    }
-}
+# =========================================================
+# Helpers
+# =========================================================
 
-def safe_paragraph_text(s: str) -> str:
-    return xml_escape(s or "")
+def _try_load_logo_reader():
+    for p in LOGO_CANDIDATES:
+        if p.exists():
+            try:
+                return ImageReader(str(p))
+            except Exception:
+                pass
+    return None
 
-def _clamp(v, vmin, vmax):
-    return max(vmin, min(v, vmax))
+def _string_width(text: str, font_name: str, font_size: int) -> float:
+    return pdfmetrics.stringWidth(text or "", font_name, font_size)
 
-def qr_bytes(text, box_size=8, border=1):
-    img = qrcode.make(
-        text,
-        box_size=box_size,
-        border=border,
-        error_correction=qrcode.constants.ERROR_CORRECT_M
-    )
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+def _fit_font_size(text: str, font_name: str, max_size: int, min_size: int, max_width_pt: float) -> int:
+    text = (text or "").strip()
+    if not text:
+        return min_size
+    size = max_size
+    while size > min_size:
+        if _string_width(text, font_name, size) <= max_width_pt:
+            return size
+        size -= 1
+    return min_size
 
-def load_logo_image():
-    # tenta arquivo no repo primeiro
-    here = os.path.dirname(os.path.abspath(__file__))
-    fpath = os.path.join(here, "LOGO_INPASA.png")
-    if os.path.exists(fpath):
-        try:
-            img = Image.open(fpath).convert("RGBA")
-            bio = io.BytesIO()
-            img.save(bio, format="PNG")
-            bio.seek(0)
-            return bio
-        except Exception:
-            pass
-    return io.BytesIO(base64.b64decode(LOGO_PNG_B64))
+def _draw_qr(c: canvas.Canvas, data: str, x: float, y: float, size_pt: float):
+    qrw = _qr.QrCodeWidget(data or "")
+    bounds = qrw.getBounds()
+    w = bounds[2] - bounds[0]
+    h = bounds[3] - bounds[1]
+    if w <= 0 or h <= 0:
+        return
 
-def fit_font_size_for_text(c, font_name, text, fs_min, fs_max, max_width_pt):
-    """
-    Ajusta fonte do TAG para caber na largura máxima (sem cortar).
-    Tenta do maior para o menor.
-    """
-    text = text or ""
-    fs = float(fs_max)
-    while fs >= float(fs_min) - 1e-9:
-        w = c.stringWidth(text, font_name, fs)
-        if w <= max_width_pt + 0.1:
-            return fs
-        fs -= 0.5
-    return float(fs_min)
+    d = Drawing(size_pt, size_pt)
+    d.add(qrw)
+    qrw.scale(size_pt / w, size_pt / h)
+    renderPDF.draw(d, c, x, y)
 
-def draw_one_label(c, layout, cfg, tag_text, desc_text):
-    W = layout["W"] * U
-    H = layout["H"] * U
-    foot = layout["footer"] * U
-    pad = layout["pad"] * U
-    qr_s = layout["qr"] * U
-    qr_m = layout["qr_margin"] * U
-    thick = layout["thick"] * U
+def _draw_border(c: canvas.Canvas, x: float, y: float, w: float, h: float):
+    c.setLineWidth(BORDER_LINE_WIDTH)
+    c.setStrokeColor(black)
+    c.rect(x, y, w, h, stroke=1, fill=0)
 
-    font_tag = cfg["font_tag"]
-    font_foot = cfg["font_foot"]
 
-    # Moldura + linha do rodapé
-    c.setLineWidth(thick)
-    c.rect(0, 0, W, H)
-    c.line(0, foot, W, foot)
+# =========================================================
+# Layout: SMALL (100x50mm)
+# =========================================================
 
-    avail = H - foot
+def _draw_label_small(c: canvas.Canvas, x: float, y: float, tag: str, desc: str, logo_reader):
+    W = 100 * mm
+    H = 50 * mm
 
-    # QR (direita, mais baixo)
-    qx = W - qr_m - qr_s
-    qy = foot + qr_m
-    c.drawImage(ImageReader(qr_bytes(tag_text)), qx, qy, width=qr_s, height=qr_s, mask="auto")
+    pad = INNER_PAD_MM * mm
+    qr_size = QR_SMALL_MM * mm
+    gap_logo_qr = GAP_LOGO_QR_MM * mm
 
-    # -------- TAG (auto-fit, Helvetica-Bold) --------
-    # regra: manter pelo menos 2mm das bordas -> max_width = W - 4mm
-    # (sem se preocupar com QR porque QR está mais baixo; TAG fica em cima)
-    margin = 2.0 * U
-    max_w = W - 2 * margin
+    _draw_border(c, x, y, W, H)
 
-    fs_max = float(layout.get("tag_fs_max", 56.0))
-    fs_min = float(layout.get("tag_fs_min", 18.0))
+    # QR direita, central vertical
+    qr_x = x + W - pad - qr_size
+    qr_y = y + (H - qr_size) / 2
 
-    tag_fs = fit_font_size_for_text(
-        c, font_tag, tag_text,
-        fs_min=fs_min,
-        fs_max=fs_max,
-        max_width_pt=max_w
-    )
+    # área esquerda do QR
+    left_area_x0 = x + pad
+    left_area_x1 = qr_x - gap_logo_qr
+    left_area_w = max(10, left_area_x1 - left_area_x0)
 
-    c.setFont(font_tag, tag_fs)
+    # faixa descrição
+    desc_band_h = 16 * mm
+    desc_x = x + pad
+    desc_y = y + pad
+    desc_w = W - 2 * pad
 
-    # posição do TAG no topo (mesmo estilo do seu modelo)
-    ty = foot + avail - pad - tag_fs * 0.90
-    if ty < foot + 2 * U:
-        ty = foot + 2 * U
+    tag_txt = (tag or "").strip().upper()
+    desc_txt = (desc or "").strip().upper()
 
-    c.drawCentredString(W / 2.0, ty, tag_text)
+    # TAG topo (subida pelo offset)
+    tag_band_top = y + H - pad
+    tag_y = tag_band_top - 7.5 * mm + (TAG_SMALL_Y_OFFSET_MM * mm)
+    tag_max_w = W - 2 * pad
 
-    # -------- LOGO (somente big tem logo_w fixo) --------
-    if layout.get("W") == 150.0 and layout.get("H") == 150.0:
-        logo_bio = load_logo_image()
-        try:
-            img = Image.open(logo_bio)
-            lw = float(layout.get("logo_w", 85.0)) * U  # 85mm fixo
-            ar = img.height / img.width
-            lh = lw * ar
+    tag_fs = _fit_font_size(tag_txt, TAG_FONT, TAG_FONT_MAX, TAG_FONT_MIN, tag_max_w)
+    c.setFont(TAG_FONT, tag_fs)
+    c.setFillColor(black)
+    c.drawCentredString(x + W / 2, tag_y, tag_txt)
 
-            # área vertical útil (entre rodapé e o TAG)
-            y_low = foot
-            y_high = max(ty - 2 * U, y_low + 2 * U)
-            max_h = max(4 * U, (y_high - y_low))
-            if lh > max_h:
-                scale = max_h / lh
-                lw *= scale
-                lh *= scale
+    # descrição (até 2 linhas)
+    desc_fs = _fit_font_size(desc_txt, DESC_FONT, DESC_FONT_MAX, DESC_FONT_MIN, desc_w)
+    c.setFont(DESC_FONT, desc_fs)
 
-            gap_txt = 4.0 * U
-            use_between = float(layout.get("logo_between_left_and_qr", 1.0)) >= 0.5
-            if use_between:
-                area_left = (thick / 2.0) + gap_txt
-                area_right = qx - gap_txt
-                usable = max(0.0, area_right - area_left)
-                x_logo = area_left + max(0.0, (usable - lw) / 2.0)
+    words = desc_txt.split()
+    line1 = ""
+    line2 = ""
+    for w_ in words:
+        test = (line1 + " " + w_).strip()
+        if _string_width(test, DESC_FONT, desc_fs) <= desc_w:
+            line1 = test
+        else:
+            test2 = (line2 + " " + w_).strip()
+            if _string_width(test2, DESC_FONT, desc_fs) <= desc_w:
+                line2 = test2
             else:
-                x_logo = (W - lw) / 2.0
+                break
 
-            # alinhar no centro vertical do QR
-            qr_cy = qy + (qr_s / 2.0)
-            y_logo = qr_cy - (lh / 2.0)
-            y_logo = _clamp(y_logo, y_low + 1 * U, (y_high - lh))
+    line_gap = (desc_fs + 1)
+    c.drawString(desc_x, desc_y + line_gap, line1)
+    if line2:
+        c.drawString(desc_x, desc_y, line2)
 
-            logo_bio.seek(0)
+    # Logo (se existir) — na área esquerda, acima da descrição
+    if logo_reader:
+        logo_area_y0 = y + desc_band_h + pad
+        logo_area_y1 = y + H - (10 * mm)
+        logo_area_h = max(10, logo_area_y1 - logo_area_y0)
+
+        logo_h = min(logo_area_h, 18 * mm)
+        logo_w = left_area_w * 0.95
+
+        lx = left_area_x0 + (left_area_w - logo_w) / 2
+        ly = logo_area_y0 + (logo_area_h - logo_h) / 2
+
+        try:
             c.drawImage(
-                ImageReader(logo_bio),
-                x_logo, y_logo,
-                width=lw, height=lh,
+                logo_reader,
+                lx, ly,
+                width=logo_w, height=logo_h,
+                preserveAspectRatio=True,
                 mask="auto",
-                preserveAspectRatio=True
             )
         except Exception:
             pass
 
-    # -------- Rodapé (auto-fit centralizado) --------
-    fw = W - 2 * pad
-    fh = foot - 2 * pad
-    if fh < 4:
-        return
+    _draw_qr(c, tag_txt, qr_x, qr_y, qr_size)
 
-    desc_safe = safe_paragraph_text((desc_text or "").upper())
 
-    style = ParagraphStyle(
-        "foot",
-        fontName=font_foot,
-        fontSize=10,
-        leading=12,
-        alignment=1,  # CENTER
-        wordWrap="CJK",
-        splitLongWords=1,
-    )
+# =========================================================
+# Layout: BIG (150x150mm)
+# =========================================================
 
-    fs_max_f = float(layout.get("foot_fs_max", 14.0))
-    fs_min_f = float(layout.get("foot_fs_min", 8.0))
+def _draw_label_big(c: canvas.Canvas, x: float, y: float, tag: str, desc: str, logo_reader):
+    W = 150 * mm
+    H = 150 * mm
 
-    placed = False
-    fs_try = fs_max_f
-    while fs_try >= fs_min_f - 1e-9:
-        style.fontSize = fs_try
-        style.leading = fs_try + 2
-        p = Paragraph(desc_safe, style)
-        w, h = p.wrap(fw, fh)
-        if h <= fh + 0.1:
-            y = pad + (fh - h) / 2.0
-            p.drawOn(c, pad, y)
-            placed = True
+    pad = INNER_PAD_MM * mm
+    qr_size = QR_BIG_MM * mm
+    gap_logo_qr = GAP_LOGO_QR_MM * mm
+
+    _draw_border(c, x, y, W, H)
+
+    # QR topo direito
+    qr_x = x + W - pad - qr_size
+    qr_y = y + H - pad - qr_size
+
+    # área esquerda do QR
+    left_area_x0 = x + pad
+    left_area_x1 = qr_x - gap_logo_qr
+    left_area_w = max(10, left_area_x1 - left_area_x0)
+
+    tag_txt = (tag or "").strip().upper()
+    desc_txt = (desc or "").strip().upper()
+
+    # TAG topo
+    tag_max_w = W - 2 * pad
+    tag_fs = _fit_font_size(tag_txt, TAG_FONT, 22, 8, tag_max_w)
+    c.setFont(TAG_FONT, tag_fs)
+    c.drawCentredString(x + W / 2, y + H - pad - (8 * mm), tag_txt)
+
+    # Logo (se existir)
+    if logo_reader:
+        logo_area_y0 = y + H - pad - qr_size
+        logo_area_y1 = y + H - pad - (18 * mm)
+        if logo_area_y1 < logo_area_y0:
+            logo_area_y0, logo_area_y1 = logo_area_y1, logo_area_y0
+
+        logo_area_h = max(10, logo_area_y1 - logo_area_y0)
+        logo_h = min(logo_area_h, 30 * mm)
+        logo_w = left_area_w * 0.95
+
+        lx = left_area_x0 + (left_area_w - logo_w) / 2
+        ly = logo_area_y0 + (logo_area_h - logo_h) / 2
+
+        try:
+            c.drawImage(
+                logo_reader,
+                lx, ly,
+                width=logo_w, height=logo_h,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+        except Exception:
+            pass
+
+    # Descrição (até 4 linhas)
+    desc_area_x = x + pad
+    desc_area_y = y + pad
+    desc_area_w = W - 2 * pad
+    desc_area_h = H - (qr_size + 3 * pad + 20 * mm)
+
+    desc_fs = _fit_font_size(desc_txt, DESC_FONT, 12, 7, desc_area_w)
+    c.setFont(DESC_FONT, desc_fs)
+
+    words = desc_txt.split()
+    lines = []
+    cur = ""
+    for w_ in words:
+        test = (cur + " " + w_).strip()
+        if _string_width(test, DESC_FONT, desc_fs) <= desc_area_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w_
+        if len(lines) >= 4:
             break
-        fs_try -= 0.5
+    if cur and len(lines) < 4:
+        lines.append(cur)
 
-    if not placed:
-        style.fontSize = fs_min_f
-        style.leading = fs_min_f + 2
-        p = Paragraph(desc_safe, style)
-        w, h = p.wrap(fw, fh)
-        y = pad + max(0, (fh - h) / 2.0)
-        p.drawOn(c, pad, y)
+    line_gap = desc_fs + 2
+    start_y = desc_area_y + (min(desc_area_h, (len(lines) * line_gap)) - line_gap)
+    for i, line in enumerate(lines):
+        yy = start_y - i * line_gap
+        if yy < desc_area_y:
+            break
+        c.drawString(desc_area_x, yy, line)
 
-def make_pdf_sheet_fill_bytes(layout, cfg, items, gap_mm):
-    A4W, A4H = 210.0, 297.0
-    cols, rows = int(layout["cols"]), int(layout["rows"])
-    W, H = float(layout["W"]), float(layout["H"])
-    g = float(gap_mm)
-    t = float(layout["thick"])
+    _draw_qr(c, tag_txt, qr_x, qr_y, qr_size)
 
-    stepX = W + (g + t)
-    stepY = H + (g + t)
-    need_w = cols * W + (cols - 1) * (g + t)
-    need_h = rows * H + (rows - 1) * (g + t)
-    ml = (A4W - need_w) / 2.0
-    mt = (A4H - need_h) / 2.0
 
+# =========================================================
+# PDF builder (mixed)
+# =========================================================
+
+def build_pdf_bytes_mixed(items):
+    """
+    items: list of tuples -> (tag, desc, layout)
+      layout: "small" or "big"
+    Retorna bytes do PDF.
+    """
     bio = io.BytesIO()
-    c = canvas.Canvas(bio, pagesize=(A4W * U, A4H * U))
+    c = canvas.Canvas(bio, pagesize=A4)
 
-    idx = 0
-    total = len(items)
-    while idx < total:
-        for r in range(rows):
-            for cc in range(cols):
-                if idx >= total:
-                    break
-                x0 = (ml + cc * stepX) * U
-                y0 = (A4H - mt - H - r * stepY) * U
-                c.saveState()
-                c.translate(x0, y0)
-                tag, desc = items[idx]
-                draw_one_label(c, layout, cfg, tag, desc)
-                c.restoreState()
-                idx += 1
+    logo_reader = _try_load_logo_reader()
+
+    page_w, page_h = A4
+    margin = PAGE_MARGIN_MM * mm
+
+    # grid small: 2 col x 5 rows
+    small_w = 100 * mm
+    small_h = 50 * mm
+    cols = 2
+    rows = 5
+    gap_x = (page_w - 2 * margin - cols * small_w) / max(1, (cols - 1))
+    gap_y = (page_h - 2 * margin - rows * small_h) / max(1, (rows - 1))
+    gap_x = max(0, gap_x)
+    gap_y = max(0, gap_y)
+
+    # big: 1 por página, centralizado
+    big_w = 150 * mm
+    big_h = 150 * mm
+
+    def new_page():
         c.showPage()
+
+    # slots small
+    small_slots = []
+    for r in range(rows):
+        for col in range(cols):
+            x = margin + col * (small_w + gap_x)
+            y = page_h - margin - (r + 1) * small_h - r * gap_y
+            small_slots.append((x, y))
+
+    slot_i = 0
+    small_page_open = False
+
+    for (tag, desc, layout) in (items or []):
+        layout = (layout or "small").strip().lower()
+
+        if layout == "big":
+            if small_page_open:
+                new_page()
+                small_page_open = False
+                slot_i = 0
+
+            bx = (page_w - big_w) / 2
+            by = (page_h - big_h) / 2
+            _draw_label_big(c, bx, by, tag, desc, logo_reader)
+            new_page()
+            continue
+
+        # small
+        if slot_i == 0:
+            small_page_open = True
+
+        if slot_i >= len(small_slots):
+            new_page()
+            slot_i = 0
+            small_page_open = True
+
+        x, y = small_slots[slot_i]
+        _draw_label_small(c, x, y, tag, desc, logo_reader)
+        slot_i += 1
 
     c.save()
     bio.seek(0)
     return bio.getvalue()
-
-def build_pdf_bytes_mixed(items_with_layout):
-    """
-    items_with_layout: list of tuples (tag, desc, layout_name)
-    layout_name in {"small","big"}
-    Gera 1 PDF (A4) com páginas separadas por layout.
-    """
-    cfg = {
-        "gap_mm": DEFAULTS["gap_mm"],
-        "font_tag": DEFAULTS["font_tag"],
-        "font_foot": DEFAULTS["font_foot"],
-    }
-
-    small_items = [(t, d) for (t, d, lay) in items_with_layout if lay == "small"]
-    big_items = [(t, d) for (t, d, lay) in items_with_layout if lay == "big"]
-
-    out = io.BytesIO()
-    c = canvas.Canvas(out, pagesize=(210 * U, 297 * U))
-
-    def render_group(layout, group_items):
-        if not group_items:
-            return
-        A4W, A4H = 210.0, 297.0
-        cols, rows = int(layout["cols"]), int(layout["rows"])
-        W, H = float(layout["W"]), float(layout["H"])
-        g = float(DEFAULTS["gap_mm"])
-        t = float(layout["thick"])
-
-        stepX = W + (g + t)
-        stepY = H + (g + t)
-        need_w = cols * W + (cols - 1) * (g + t)
-        need_h = rows * H + (rows - 1) * (g + t)
-        ml = (A4W - need_w) / 2.0
-        mt = (A4H - need_h) / 2.0
-
-        idx = 0
-        total = len(group_items)
-        while idx < total:
-            for r in range(rows):
-                for cc in range(cols):
-                    if idx >= total:
-                        break
-                    x0 = (ml + cc * stepX) * U
-                    y0 = (A4H - mt - H - r * stepY) * U
-                    c.saveState()
-                    c.translate(x0, y0)
-                    tag, desc = group_items[idx]
-                    draw_one_label(c, layout, cfg, tag, desc)
-                    c.restoreState()
-                    idx += 1
-            c.showPage()
-
-    render_group(DEFAULTS["small"], small_items)
-    render_group(DEFAULTS["big"], big_items)
-
-    c.save()
-    out.seek(0)
-    return out.getvalue()
