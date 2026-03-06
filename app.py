@@ -18,7 +18,7 @@ from pdf_engine import build_pdf_bytes_mixed
 st.set_page_config(page_title="Gerador de Tags", layout="wide")
 
 # =========================
-# TIMEZONE (Brasília) — ajuste mais simples e confiável
+# TIMEZONE (Brasília)
 # =========================
 BR_TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -26,23 +26,26 @@ def now_str():
     return datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # =========================
-# AUTH (simples)
+# AUTH
 # =========================
 ADMIN_USER = "admin"
 ADMIN_PASS = "cpcm123"
 
+# senha extra só para ações destrutivas do admin
+ADMIN_CONFIRM_PASS = "cpcm123"
+
 # =========================
 # Persistência simples (JSON local do app)
-# (permitidos / cache bases)
 # =========================
 ALLOWLIST_FILE = "users_allowlist.json"
 BASE_CACHE_FILE = "bases_cache.json"
+PASSWORDS_FILE = "users_passwords.json"
 
 def norm_user(s: str) -> str:
     return (s or "").strip().upper()
 
 def user_password_rule(username: str) -> str:
-    # usuário normal: senha = <usuario>123
+    # senha padrão inicial
     u = (username or "").strip().lower()
     return f"{u}123"
 
@@ -95,7 +98,7 @@ def idx_of(headers_list, *names):
     return None
 
 # =========================
-# Regra do supervisório: parênteses externos obrigatórios
+# Regra do supervisório
 # =========================
 def _fix_parentheses(s: str) -> str:
     s = (s or "").strip()
@@ -124,7 +127,6 @@ def normalize_supervisor_field(text: str) -> str:
     s = (text or "").strip().upper()
     s = _fix_parentheses(s)
 
-    # remove par externo se já existir, pra não duplicar
     if s.startswith("(") and s.endswith(")"):
         s = s[1:-1].strip()
 
@@ -144,7 +146,6 @@ def build_manual_description(prefix_desc: str, supervisor_text: str) -> str:
     return f"{p} {sup}".strip() if p else sup
 
 def remove_tag_prefix_inside_parentheses(tag: str, desc_final: str) -> str:
-    # remove (ME), (TIT), etc quando for igual ao prefixo da TAG
     t = (tag or "").strip().upper()
     d = (desc_final or "").strip().upper()
     pfx = get_prefix(t)
@@ -193,6 +194,60 @@ def load_bases_cache():
     return {}, {}, ""
 
 # =========================
+# Passwords (JSON local)
+# =========================
+def load_passwords():
+    if os.path.exists(PASSWORDS_FILE):
+        try:
+            with open(PASSWORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {norm_user(k): str(v) for k, v in data.items() if str(k).strip()}
+        except Exception:
+            pass
+    return {}
+
+def save_passwords(passwords_dict):
+    normed = {}
+    for k, v in (passwords_dict or {}).items():
+        kk = norm_user(k)
+        vv = str(v or "").strip()
+        if kk and vv:
+            normed[kk] = vv
+    with open(PASSWORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(normed, f, ensure_ascii=False, indent=2)
+    return normed
+
+def get_user_saved_password(username: str) -> str:
+    passwords = st.session_state.get("passwords", {})
+    return str(passwords.get(norm_user(username), "")).strip()
+
+def verify_user_password(username: str, password_input: str) -> bool:
+    uname = norm_user(username)
+    p_in = (password_input or "").strip()
+
+    saved = get_user_saved_password(uname)
+    if saved:
+        return p_in == saved
+
+    return p_in.lower() == user_password_rule(uname).lower()
+
+def set_user_password(username: str, new_password: str):
+    uname = norm_user(username)
+    passwords = dict(st.session_state.get("passwords", {}))
+    passwords[uname] = (new_password or "").strip()
+    passwords = save_passwords(passwords)
+    st.session_state["passwords"] = passwords
+
+def reset_user_password_to_default(username: str):
+    uname = norm_user(username)
+    passwords = dict(st.session_state.get("passwords", {}))
+    if uname in passwords:
+        del passwords[uname]
+    passwords = save_passwords(passwords)
+    st.session_state["passwords"] = passwords
+
+# =========================
 # Google Sheets LOG
 # =========================
 def get_gs_client():
@@ -212,13 +267,11 @@ def get_log_worksheet():
     ws_name = st.secrets["log_sheet"].get("worksheet", "LOG")
     sh = gc.open_by_key(sheet_id)
 
-    # tenta abrir aba; se não existir, cria
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
         ws = sh.add_worksheet(title=ws_name, rows=2000, cols=10)
 
-    # garante cabeçalho
     try:
         a1 = ws.acell("A1").value
     except Exception:
@@ -250,11 +303,6 @@ def export_log_xlsx_from_gs() -> bytes:
     return bio.getvalue()
 
 def clear_user_log(username: str) -> int:
-    """
-    Remove do LOG do Google Sheets todas as linhas cujo USUARIO == username
-    Mantém cabeçalho.
-    Retorna quantidade removida.
-    """
     ws = get_log_worksheet()
     values = ws.get_all_values()
 
@@ -280,18 +328,20 @@ def clear_user_log(username: str) -> int:
     return removed
 
 # =========================
-# Session state (com chaves estáveis p/ não dar KeyError)
+# Session state
 # =========================
 def ensure_state():
     if "auth" not in st.session_state:
         st.session_state["auth"] = {"logged": False, "role": "", "user": ""}
 
-    # lista por usuário (não é geral)
     if "items_by_user" not in st.session_state:
-        st.session_state["items_by_user"] = {}  # user -> list[dict]
+        st.session_state["items_by_user"] = {}
 
     if "allowlist" not in st.session_state:
         st.session_state["allowlist"] = load_allowlist()
+
+    if "passwords" not in st.session_state:
+        st.session_state["passwords"] = load_passwords()
 
     if "base_tags" not in st.session_state or "base_prefix" not in st.session_state:
         bt, bp, saved_at = load_bases_cache()
@@ -299,7 +349,6 @@ def ensure_state():
         st.session_state["base_prefix"] = bp
         st.session_state["bases_saved_at"] = saved_at
 
-    # ✅ chaves estáveis pros widgets do login
     st.session_state.setdefault("login_user", "")
     st.session_state.setdefault("login_pass", "")
 
@@ -338,19 +387,18 @@ if not auth["logged"]:
             st.error("Informe usuário e senha.")
             st.stop()
 
-        # admin
         if u.lower() == ADMIN_USER and p == ADMIN_PASS:
             st.session_state["auth"] = {"logged": True, "role": "admin", "user": "ADMIN"}
             st.rerun()
 
-        # user normal
-        if p.lower() == user_password_rule(u).lower():
-            user_norm = norm_user(u)
-            allow = st.session_state["allowlist"]
-            if allow and (user_norm not in allow):
-                st.error("Usuário não autorizado. Fale com o administrador.")
-                st.stop()
+        user_norm = norm_user(u)
+        allow = st.session_state["allowlist"]
 
+        if allow and (user_norm not in allow):
+            st.error("Usuário não autorizado. Fale com o administrador.")
+            st.stop()
+
+        if verify_user_password(user_norm, p):
             st.session_state["auth"] = {"logged": True, "role": "user", "user": user_norm}
             st.rerun()
 
@@ -374,10 +422,38 @@ with top2:
         st.rerun()
 
 # =========================
+# PERFIL / SENHA
+# =========================
+with st.expander("👤 Perfil e senha", expanded=False):
+    if is_admin:
+        st.info("Perfil ADMIN. A senha do admin continua fixa no código.")
+    else:
+        st.markdown("### Alterar minha senha")
+
+        with st.form("form_change_my_password", clear_on_submit=True):
+            current_pass = st.text_input("Senha atual", type="password", key="my_current_pass")
+            new_pass = st.text_input("Nova senha", type="password", key="my_new_pass")
+            confirm_new_pass = st.text_input("Confirmar nova senha", type="password", key="my_confirm_new_pass")
+            do_change_pass = st.form_submit_button("Salvar nova senha")
+
+        if do_change_pass:
+            if not current_pass.strip() or not new_pass.strip() or not confirm_new_pass.strip():
+                st.error("Preencha todos os campos.")
+            elif not verify_user_password(user, current_pass):
+                st.error("Senha atual inválida.")
+            elif len(new_pass.strip()) < 4:
+                st.error("A nova senha deve ter pelo menos 4 caracteres.")
+            elif new_pass != confirm_new_pass:
+                st.error("A confirmação da nova senha não confere.")
+            else:
+                set_user_password(user, new_pass.strip())
+                st.success("Senha alterada com sucesso.")
+
+# =========================
 # ADMIN PANEL
 # =========================
 if is_admin:
-    with st.expander("🔒 Admin — Bases + Usuários + LOG", expanded=False):
+    with st.expander("🔒 Admin — Bases + Usuários + Senhas + LOG", expanded=False):
         st.markdown("### Bases (somente admin)")
         colA, colB = st.columns([1, 1], gap="large")
 
@@ -388,7 +464,12 @@ if is_admin:
                 key="up_base"
             )
             base_sheets = list_sheets(up_base)
-            base_sheet = st.selectbox("Aba da Base principal", options=base_sheets or ["(envie o arquivo)"], index=0, key="base_sheet")
+            base_sheet = st.selectbox(
+                "Aba da Base principal",
+                options=base_sheets or ["(envie o arquivo)"],
+                index=0,
+                key="base_sheet"
+            )
 
         with colB:
             up_prefix = st.file_uploader(
@@ -397,7 +478,12 @@ if is_admin:
                 key="up_prefix"
             )
             pref_sheets = list_sheets(up_prefix)
-            pref_sheet = st.selectbox("Aba da Base prefixos", options=pref_sheets or ["(envie o arquivo)"], index=0, key="pref_sheet")
+            pref_sheet = st.selectbox(
+                "Aba da Base prefixos",
+                options=pref_sheets or ["(envie o arquivo)"],
+                index=0,
+                key="pref_sheet"
+            )
 
         if st.button("Salvar bases", key="btn_save_bases"):
             base_tags = {}
@@ -456,6 +542,47 @@ if is_admin:
             st.success(f"Allowlist salva ({len(st.session_state['allowlist'])} usuários).")
 
         st.divider()
+        st.markdown("### Reset de senha de usuário")
+
+        allow_users = st.session_state["allowlist"] or []
+        if not allow_users:
+            st.info("Não há usuários na allowlist.")
+        else:
+            reset_user = st.selectbox("Usuário para resetar senha", options=allow_users, key="sel_reset_user")
+
+            with st.form("form_reset_user_password", clear_on_submit=True):
+                reset_mode = st.radio(
+                    "Tipo de reset",
+                    options=["Padrão (usuario123)", "Definir nova senha agora"],
+                    key="reset_mode_user_pass"
+                )
+
+                custom_reset_pass = ""
+                if reset_mode == "Definir nova senha agora":
+                    custom_reset_pass = st.text_input("Nova senha do usuário", type="password", key="custom_reset_pass")
+
+                admin_reset_pass = st.text_input("Senha do administrador", type="password", key="admin_reset_pass")
+                do_reset = st.form_submit_button("Executar reset de senha")
+
+            if do_reset:
+                if not admin_reset_pass.strip():
+                    st.error("Informe a senha do administrador.")
+                elif admin_reset_pass != ADMIN_CONFIRM_PASS:
+                    st.error("Senha do administrador inválida.")
+                else:
+                    if reset_mode == "Padrão (usuario123)":
+                        reset_user_password_to_default(reset_user)
+                        st.success(f"Senha de {reset_user} resetada para o padrão: {reset_user.lower()}123")
+                    else:
+                        if not custom_reset_pass.strip():
+                            st.error("Informe a nova senha do usuário.")
+                        elif len(custom_reset_pass.strip()) < 4:
+                            st.error("A nova senha deve ter pelo menos 4 caracteres.")
+                        else:
+                            set_user_password(reset_user, custom_reset_pass.strip())
+                            st.success(f"Senha de {reset_user} redefinida com sucesso.")
+
+        st.divider()
         st.markdown("### LOG completo (Google Sheets) — somente admin")
         try:
             xbytes = export_log_xlsx_from_gs()
@@ -475,21 +602,32 @@ if is_admin:
         try:
             ws = get_log_worksheet()
             vals = ws.get_all_values()
-            users_log = sorted({r[1].strip().upper() for r in vals[1:] if len(r) >= 2 and str(r[1]).strip()})
+            users_log = sorted({
+                r[1].strip().upper()
+                for r in vals[1:]
+                if len(r) >= 2 and str(r[1]).strip()
+            })
+
             if not users_log:
                 st.info("Não há usuários no LOG para limpar.")
             else:
                 user_to_clear = st.selectbox("Usuário para limpar", options=users_log, key="sel_clear_user")
 
-                cA, cB = st.columns([1, 2])
-                with cA:
-                    do_clear = st.button("Limpar LOG deste usuário", key="btn_clear_user_log")
-                with cB:
-                    st.caption("Remove todas as linhas do LOG onde USUARIO = usuário selecionado. Mantém cabeçalho e demais usuários.")
+                st.caption("A limpeza só será executada após confirmação com senha do administrador.")
+
+                with st.form("form_clear_user_log", clear_on_submit=True):
+                    confirm_pass = st.text_input("Senha do administrador", type="password", key="confirm_clear_log_pass")
+                    do_clear = st.form_submit_button("Confirmar limpeza do LOG")
 
                 if do_clear:
-                    removed = clear_user_log(user_to_clear)
-                    st.success(f"OK — removidos {removed} registros do usuário {user_to_clear}.")
+                    if not confirm_pass.strip():
+                        st.error("Informe a senha do administrador.")
+                    elif confirm_pass != ADMIN_CONFIRM_PASS:
+                        st.error("Senha inválida. Limpeza cancelada.")
+                    else:
+                        removed = clear_user_log(user_to_clear)
+                        st.success(f"OK — removidos {removed} registros do usuário {user_to_clear}.")
+
         except Exception as e:
             st.error(f"Falha ao carregar usuários do LOG: {e}")
 
@@ -506,7 +644,6 @@ base_prefix = st.session_state["base_prefix"]
 tag_raw = st.text_input("TAG", value="", placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019", key="inp_tag")
 tag = norm_tag(tag_raw)
 
-# Só 2 layouts
 is_square = st.checkbox("TAG QUADRADA (150×150)", value=False, key="chk_square")
 layout_name = "square" if is_square else "small"
 
@@ -631,7 +768,6 @@ with c2:
             st.error(f"Falha ao gerar PDF: {e}")
             st.stop()
 
-        # log só quando clica pra baixar
         def _on_download():
             append_log_rows_gs(rows_log)
 
