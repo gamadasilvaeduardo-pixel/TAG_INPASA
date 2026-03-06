@@ -31,7 +31,7 @@ def now_str():
 ADMIN_USER = "admin"
 ADMIN_PASS = "cpcm123"
 
-# senha extra só para ações destrutivas do admin
+# senha extra para ações destrutivas/admin
 ADMIN_CONFIRM_PASS = "cpcm123"
 
 # =========================
@@ -387,10 +387,12 @@ if not auth["logged"]:
             st.error("Informe usuário e senha.")
             st.stop()
 
+        # admin
         if u.lower() == ADMIN_USER and p == ADMIN_PASS:
             st.session_state["auth"] = {"logged": True, "role": "admin", "user": "ADMIN"}
             st.rerun()
 
+        # user
         user_norm = norm_user(u)
         allow = st.session_state["allowlist"]
 
@@ -428,7 +430,7 @@ with st.expander("👤 Perfil e senha", expanded=False):
     if is_admin:
         st.info("Perfil ADMIN. A senha do admin continua fixa no código.")
     else:
-        st.markdown("### Alterar minha senha")
+        st.markdown("### Redefinir minha senha")
 
         with st.form("form_change_my_password", clear_on_submit=True):
             current_pass = st.text_input("Senha atual", type="password", key="my_current_pass")
@@ -453,7 +455,7 @@ with st.expander("👤 Perfil e senha", expanded=False):
 # ADMIN PANEL
 # =========================
 if is_admin:
-    with st.expander("🔒 Admin — Bases + Usuários + Senhas + LOG", expanded=False):
+    with st.expander("🔒 Admin — Bases + Usuários + LOG", expanded=False):
         st.markdown("### Bases (somente admin)")
         colA, colB = st.columns([1, 1], gap="large")
 
@@ -548,21 +550,21 @@ if is_admin:
         if not allow_users:
             st.info("Não há usuários na allowlist.")
         else:
-            reset_user = st.selectbox("Usuário para resetar senha", options=allow_users, key="sel_reset_user")
+            reset_user = st.selectbox(
+                "Usuário para resetar",
+                options=allow_users,
+                key="sel_reset_user"
+            )
+
+            st.caption(f"O reset remove a senha personalizada e volta para a senha padrão: {reset_user.lower()}123")
 
             with st.form("form_reset_user_password", clear_on_submit=True):
-                reset_mode = st.radio(
-                    "Tipo de reset",
-                    options=["Padrão (usuario123)", "Definir nova senha agora"],
-                    key="reset_mode_user_pass"
+                admin_reset_pass = st.text_input(
+                    "Senha do administrador",
+                    type="password",
+                    key="admin_reset_pass"
                 )
-
-                custom_reset_pass = ""
-                if reset_mode == "Definir nova senha agora":
-                    custom_reset_pass = st.text_input("Nova senha do usuário", type="password", key="custom_reset_pass")
-
-                admin_reset_pass = st.text_input("Senha do administrador", type="password", key="admin_reset_pass")
-                do_reset = st.form_submit_button("Executar reset de senha")
+                do_reset = st.form_submit_button("Resetar senha para o padrão")
 
             if do_reset:
                 if not admin_reset_pass.strip():
@@ -570,17 +572,8 @@ if is_admin:
                 elif admin_reset_pass != ADMIN_CONFIRM_PASS:
                     st.error("Senha do administrador inválida.")
                 else:
-                    if reset_mode == "Padrão (usuario123)":
-                        reset_user_password_to_default(reset_user)
-                        st.success(f"Senha de {reset_user} resetada para o padrão: {reset_user.lower()}123")
-                    else:
-                        if not custom_reset_pass.strip():
-                            st.error("Informe a nova senha do usuário.")
-                        elif len(custom_reset_pass.strip()) < 4:
-                            st.error("A nova senha deve ter pelo menos 4 caracteres.")
-                        else:
-                            set_user_password(reset_user, custom_reset_pass.strip())
-                            st.success(f"Senha de {reset_user} redefinida com sucesso.")
+                    reset_user_password_to_default(reset_user)
+                    st.success(f"Senha de {reset_user} resetada para o padrão: {reset_user.lower()}123")
 
         st.divider()
         st.markdown("### LOG completo (Google Sheets) — somente admin")
@@ -611,12 +604,20 @@ if is_admin:
             if not users_log:
                 st.info("Não há usuários no LOG para limpar.")
             else:
-                user_to_clear = st.selectbox("Usuário para limpar", options=users_log, key="sel_clear_user")
+                user_to_clear = st.selectbox(
+                    "Usuário para limpar",
+                    options=users_log,
+                    key="sel_clear_user"
+                )
 
                 st.caption("A limpeza só será executada após confirmação com senha do administrador.")
 
                 with st.form("form_clear_user_log", clear_on_submit=True):
-                    confirm_pass = st.text_input("Senha do administrador", type="password", key="confirm_clear_log_pass")
+                    confirm_pass = st.text_input(
+                        "Senha do administrador",
+                        type="password",
+                        key="confirm_clear_log_pass"
+                    )
                     do_clear = st.form_submit_button("Confirmar limpeza do LOG")
 
                 if do_clear:
@@ -641,7 +642,12 @@ st.subheader("2) Inserir TAG")
 base_tags = st.session_state["base_tags"]
 base_prefix = st.session_state["base_prefix"]
 
-tag_raw = st.text_input("TAG", value="", placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019", key="inp_tag")
+tag_raw = st.text_input(
+    "TAG",
+    value="",
+    placeholder="Ex: INC-1608516A / TIT-1800100 / ME-1203019",
+    key="inp_tag"
+)
 tag = norm_tag(tag_raw)
 
 is_square = st.checkbox("TAG QUADRADA (150×150)", value=False, key="chk_square")
